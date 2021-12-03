@@ -70,10 +70,11 @@ function init(plugin)
     local function loadUserData()
         assert(app.activeSprite ~= nil)
         if app.activeSprite.data ~= nil and app.activeSprite.data ~= "" then
-            local status,data = pcall(function() json.decode(app.activeSprite.data) end)
+            local status,data = pcall(function() return json.decode(app.activeSprite.data) end)
             if status == true and type(data) == "table" then
                 if data.mappings ~= nil then
                     mappings = data.mappings
+                    print(mappings)
                 end
             end
         end
