@@ -1,0 +1,16 @@
+{
+    "name": "Limit Colour Component Levels",
+    "displayName": "Limit Colour Component Levels",
+    "description": "Limit colour components to specified number of levels",
+    "version": "0.0.1",
+    "author": { "name": "Carl Olsson", "email": "carl.olsson@gmail.com" },
+    "contributors": [ "surt" ],
+    "publisher": "surt",
+    "license": "CC0",
+    "categories": [ "Scripts" ],
+    "contributes": {
+        "scripts": [
+            { "path": "./Limit Colour Component Levels.lua" }
+        ]
+    }
+}

@@ -1,0 +1,16 @@
+{
+    "name": "Recolouriser",
+    "displayName": "Recolouriser",
+    "description": "Recolour image",
+    "version": "0.0.1",
+    "author": { "name": "Carl Olsson", "email": "carl.olsson@gmail.com" },
+    "contributors": [ "surt" ],
+    "publisher": "surt",
+    "license": "CC0",
+    "categories": [ "Scripts" ],
+    "contributes": {
+        "scripts": [
+            { "path": "./Recolouriser.lua" }
+        ]
+    }
+}
