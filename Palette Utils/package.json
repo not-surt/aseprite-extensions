@@ -1,0 +1,16 @@
+{
+    "name": "Palette Utils",
+    "displayName": "Palette Utils",
+    "description": "Various utils for manipulating the palette",
+    "version": "0.0.1",
+    "author": { "name": "Carl Olsson", "email": "carl.olsson@gmail.com" },
+    "contributors": [ "surt" ],
+    "publisher": "surt",
+    "license": "CC0",
+    "categories": [ "Scripts" ],
+    "contributes": {
+        "scripts": [
+            { "path": "./Palette Utils.lua" }
+        ]
+    }
+}

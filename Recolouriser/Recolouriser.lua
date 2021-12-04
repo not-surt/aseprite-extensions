@@ -5,7 +5,7 @@
 local json = dofile("json.lua")
 
 function init(plugin)
-    local defaults = {loadOnOpen=false, storeOnClose=false, applyTo="Pixels"}
+    local defaults = {windowBounds = nil, loadOnOpen = false, storeOnClose = false, applyTo = "Pixels"}
     if plugin.preferences == nil then plugin.preferences = {} end
     for key, value in pairs(defaults) do
         if plugin.preferences[key] == nil then plugin.preferences[key] = value end
@@ -13,42 +13,64 @@ function init(plugin)
     local mappings = {}
     local dlg = nil
 
-    local function buildMappingsLut(palette, mappings)
+    local function buildMappingsLut(mappings)
         local lut = {}
-        local lutSize = 256
-        if palette ~= nil then
-            lutSize = #palette
-        end
-        for i=0,lutSize-1 do
+        for i=0,255 do
             lut[i] = i
         end
         for _,mapping in ipairs(mappings) do
-            if mapping.selected > 0 then
-                for i=1,#mapping.from do
-                    local pos = 0.0
-                    if #mapping.from > 1 then
-                        pos = (i - 1) / (#mapping.from)
-                    end
-                    local toIndex = 1 + math.floor(pos * (#mapping.to[mapping.selected]))
-                    lut[mapping.from[i]] = mapping.to[mapping.selected][toIndex]
-                end
+            assert(#mapping.from > 0)
+            for fromIndex = 1, #mapping.from do
+                local pos = (fromIndex - 1) / #mapping.from
+                local toIndex = 1 + math.floor(pos * #mapping.to)
+                lut[mapping.from[fromIndex]] = mapping.to[toIndex]
             end
         end
         return lut
     end
 
     local function applyMappingLutToPixels(image, position, selection, lut)
+        local palette = app.activeSprite.palettes[1]
+        local rgbLut = {}
+        if image.colorMode == ColorMode.RGB then
+            for i = 0,255 do
+                rgbLut[palette:getColor(i).rgbaPixel] = palette:getColor(lut[i]).rgbaPixel
+            end
+        end
+        local function applyToPixelIndexed(it)
+            it(lut[it()])
+        end
+        local function applyToPixelRgb(it)
+            local fromPixel = it()
+            if rgbLut[fromPixel] ~= nil then
+                it(rgbLut[fromPixel])
+            end
+        end
         if selection == nil or selection.isEmpty then
-            for it in image:pixels() do
-                it(lut[it()])
+            if image.colorMode == ColorMode.INDEXED then
+                for it in image:pixels() do
+                    applyToPixelIndexed(it)
+                end
+            elseif image.colorMode == ColorMode.RGB then
+                for it in image:pixels() do
+                    applyToPixelRgb(it)
+                end
             end
         else
             local bounds = Rectangle(0, 0, image.width, image.height)
             local offsetSelectionBounds = Rectangle(selection.bounds.x - position.x, selection.bounds.y - position.y, selection.bounds.width, selection.bounds.height)
             bounds = bounds:intersect(offsetSelectionBounds)
-            for it in image:pixels(bounds) do
-                if selection:contains(it.x + position.x, it.y + position.y) then
-                    it(lut[it()])
+            if image.colorMode == ColorMode.INDEXED then
+                for it in image:pixels() do
+                    if selection:contains(it.x + position.x, it.y + position.y) then
+                        applyToPixelIndexed(it)
+                    end
+                end
+            elseif image.colorMode == ColorMode.RGB then
+                for it in image:pixels() do
+                    if selection:contains(it.x + position.x, it.y + position.y) then
+                        applyToPixelRgb(it)
+                    end
                 end
             end
         end
@@ -74,7 +96,6 @@ function init(plugin)
             if status == true and type(data) == "table" then
                 if data.mappings ~= nil then
                     mappings = data.mappings
-                    print(mappings)
                 end
             end
         end
@@ -106,29 +127,39 @@ function init(plugin)
 
     local function updateMappingsFromShades()
         -- need to manually update because shades in sort mode do not fire an event
-        for i,mapping in ipairs(mappings) do
-            mapping.from = paletteIndicesFromColours(dlg.data["from"..i])
+        for i, mapping in ipairs(mappings) do
+            mapping.from = paletteIndicesFromColours(dlg.data["from" .. i])
             if mapping.selected > 0 then
-                mapping.to[mapping.selected] = paletteIndicesFromColours(dlg.data["to"..i])
+                mapping.to[mapping.selected] = paletteIndicesFromColours(dlg.data["to" .. i])
             end
         end
     end
 
-    local function updateDialogFromMappings()
+    local function updateDialogFromMappingIndex(i)
+        local mapping = mappings[i]
         local palette = app.activeSprite.palettes[1]
-        for i,mapping in ipairs(mappings) do
-            dlg:modify{id="from"..i, colors=coloursFromPaletteIndices(palette, mapping.from)}
-            dlg:modify{id="toSlider"..i, max=#mapping.to, value=mapping.selected}
-            local colours
-            if mapping.selected == 0 then colours = {}
-            else colours = coloursFromPaletteIndices(palette, mapping.to[mapping.selected]) end
-            dlg:modify{id="to"..i, colors=colours}
-        end
+        local fromHasColours = #mapping.from > 0
+        local toHasRamps = #mapping.to > 0
+        local toRampValid = mapping.selected > 0
+        local toHasColours = toRampValid and #mapping.to[mapping.selected] > 0
+        dlg:modify{id = "from" .. i, colors = coloursFromPaletteIndices(palette, mapping.from)}
+        dlg:modify{id = "fromSelectColours" .. i, enabled = fromHasColours}
+        dlg:modify{id = "fromClearColours" .. i, enabled = fromHasColours}
+        dlg:modify{id = "toSlider" .. i, max = #mapping.to, value = mapping.selected, enabled = toHasRamps}
+        dlg:modify{id = "toRemoveRamp" .. i, enabled = toRampValid}
+        dlg:modify{id = "toClearRamps" .. i, enabled = toHasRamps}
+        local colours
+        if mapping.selected == 0 then colours = {}
+        else colours = coloursFromPaletteIndices(palette, mapping.to[mapping.selected]) end
+        dlg:modify{id = "to" .. i, colors = colours, enabled = toRampValid}
+        dlg:modify{id = "toAddColours" .. i, enabled = toRampValid}
+        dlg:modify{id = "toSelectColours" .. i, enabled = toHasColours}
+        dlg:modify{id = "toClearColours" .. i, enabled = toHasColours}
     end
 
     local function appendTable(a, b)
         local offset = #a
-        for i,val in ipairs(b) do
+        for i, val in ipairs(b) do
             a[offset + i] = val
         end
     end
@@ -142,44 +173,53 @@ function init(plugin)
             isRebuildDialog = true
             buildDialog()
         end
-        dlg = Dialog{title="Recolouriser", onclose=function()
+        dlg = Dialog{title = "Recolouriser", onclose = function()
+            plugin.preferences["windowBounds"] = Rectangle(dlg.bounds)
             if not isRebuildDialog then
                 updateMappingsFromShades()
-            end
-            if plugin.preferences.storeOnClose then
-                storeUserData()
+                if plugin.preferences["storeOnClose"] then
+                    storeUserData()
+                end
             end
         end}
-        dlg:button{text="Add Mapping", onclick=function()
+        dlg:button{text = "Add Mapping", onclick = function()
             updateMappingsFromShades()
             local i = #mappings + 1
-            mappings[i] = {from=selectedPaletteIndices(), to={}, selected=0}
+            mappings[i] = {from = selectedPaletteIndices(), to = {}, selected = 0}
             rebuildDialog()
         end}
-        dlg:button{id="clearMappings", text="Clear Mappings", enabled=#mappings > 0, onclick=function()
+        dlg:button{id = "clearMappings", text = "Clear Mappings", enabled = #mappings > 0, onclick = function()
             mappings = {}
             rebuildDialog()
         end}
         dlg:newrow()
-        dlg:button{text="Load from User Data", onclick=function()
+        dlg:button{text = "Load from User Data", onclick = function()
             loadUserData()
             rebuildDialog()
         end}
-        dlg:button{text="Store in User Data", onclick=function()
+        dlg:button{text = "Store in User Data", onclick = function()
             updateMappingsFromShades()
             storeUserData()
         end}
         dlg:newrow()
-        dlg:check{id="loadOnOpen", text="Load User Data On Open", selected=plugin.preferences["loadOnOpen"], onclick=function() plugin.preferences["loadOnOpen"] = dlg.data["loadOnOpen"] end}
-        dlg:check{id="storeOnClose", text="Store User Data On Close", selected=plugin.preferences["storeOnClose"], onclick=function() plugin.preferences["storeOnClose"] = dlg.data["storeOnClose"] end}
+        dlg:check{id = "loadOnOpen", text = "Load User Data On Open", selected = plugin.preferences["loadOnOpen"], onclick = function() plugin.preferences["loadOnOpen"] = dlg.data["loadOnOpen"] end}
+        dlg:check{id = "storeOnClose", text = "Store User Data On Close", selected = plugin.preferences["storeOnClose"], onclick = function() plugin.preferences["storeOnClose"] = dlg.data["storeOnClose"] end}
         dlg:separator()
-        dlg:combobox{id="applyTo", label="Apply To", options={"Pixels", "Palette"}, option=plugin.preferences["applyTo"], onchange=function() plugin.preferences["applyTo"] = dlg.data["applyTo"] end}
-        dlg:button{id="applyMappings", text="Apply Mappings", enabled=#mappings > 0, onclick=function()
+        dlg:combobox{id = "applyTo", label = "Apply To", options = {"Pixels", "Palette"}, option = plugin.preferences["applyTo"], onchange = function() plugin.preferences["applyTo"] = dlg.data["applyTo"] end}
+        dlg:button{id = "applyMappings", text = "Apply Mappings", enabled = #mappings > 0, onclick = function()
             updateMappingsFromShades()
             assert(app.activeSprite ~= nil)
             app.transaction(function()
                 local palette = app.activeSprite.palettes[1]
-                local lut = buildMappingsLut(palette, mappings)
+                local lutMappings = {}
+                local i = 1
+                for _, mapping in ipairs(mappings) do
+                    if mapping.selected > 0 then
+                        lutMappings[i] = {from=mapping.from, to=mapping.to[mapping.selected]}
+                        i = i + 1
+                    end
+                end
+                local lut = buildMappingsLut(lutMappings)
                 if dlg.data.applyTo == "Palette" then
                     applyMappingLutToPalette(palette, lut)
                 elseif dlg.data.applyTo == "Pixels" then
@@ -191,127 +231,93 @@ function init(plugin)
                 end
                     end)
             app.refresh()
+            for i, mapping in ipairs(mappings) do
+                updateDialogFromMappingIndex(i)
+            end
         end}
-        -- dlg:button{text="Permutations Sheet", onclick=function() end}
-        dlg:separator{text="Mappings"}
-        for i,mapping in ipairs(mappings) do
-            dlg:separator{text="Mapping "..i}
-            dlg:shades{id="from"..i, label="From", mode="sort", colors=mapping.from, onclick=function()
+        -- dlg:button{text = "Permutations Sheet", onclick = function() end}
+        dlg:separator{text = "Mappings"}
+        for i, mapping in ipairs(mappings) do
+            dlg:separator{text = "Mapping " .. i}
+            dlg:shades{id = "from" .. i, label="From", mode="sort", colors=mapping.from, onclick = function()
                 -- does not fire, need to manually update
-                -- mapping.from = paletteIndicesFromColours(dlg.data["from"..i])
+                -- mapping.from = paletteIndicesFromColours(dlg.data["from" .. i])
             end}
-            dlg:button{text="Add Colours", onclick=function()
+            dlg:button{text = "Add Colours", onclick = function()
                 appendTable(mapping.from, selectedPaletteIndices())
-                dlg:modify{id="from"..i, colors=coloursFromPaletteIndices(app.activeSprite.palettes[1], mapping.from)}
-                dlg:modify{id="from"..i, enabled=true}
-                dlg:modify{id="fromClearColours"..i, enabled=true}
+                updateDialogFromMappingIndex(i)
             end}
-            dlg:button{id="fromClearColours"..i, text="Clear Colours", onclick=function()
+            dlg:button{id = "fromSelectColours" .. i, text = "Select Colours", onclick = function()
+                app.range.colors = mapping.from
+            end}
+            dlg:button{id = "fromClearColours" .. i, text = "Clear Colours", onclick = function()
                 mapping.from = {}
-                local palette = app.activeSprite.palettes[1]
-                dlg:modify{id="from"..i, colors=coloursFromPaletteIndices(palette, mapping.from)}
-                dlg:modify{id="from"..i, enabled=false}
-                dlg:modify{id="fromClearColours"..i, enabled=false}
+                updateDialogFromMappingIndex(i)
             end}
             dlg:newrow()
             dlg:separator()
-            dlg:slider{label="To", id="toSlider"..i, min=0, max=#mapping.to, value=0, enabled=false, onchange=function()
+            dlg:slider{label="To", id = "toSlider" .. i, min = 0, max = #mapping.to, value = 0, onchange = function()
                 updateMappingsFromShades()
-                local palette = app.activeSprite.palettes[1]
-                mapping.selected = dlg.data["toSlider"..i]
-                local colours
-                if mapping.selected == 0 then colours = {}
-                else colours = coloursFromPaletteIndices(palette, mapping.to[mapping.selected]) end
-                dlg:modify{id="to"..i, colors=colours}
-                local validRamp = mapping.selected > 0
-                dlg:modify{id="toRemoveRamp"..i, enabled=validRamp}
-                dlg:modify{id="toAddColours"..i, enabled=validRamp}
-                dlg:modify{id="toClearColours"..i, enabled=(validRamp and #colours > 0)}
+                mapping.selected = dlg.data["toSlider" .. i]
+                updateDialogFromMappingIndex(i)
             end}
-            dlg:button{text="Add Ramp", onclick=function()
+            dlg:button{text = "Add Ramp", onclick = function()
                 mapping.selected = #mapping.to + 1
                 local indices = selectedPaletteIndices()
                 table.insert(mapping.to, mapping.selected, indices)
-                dlg:modify{id="toSlider"..i, max=#mapping.to, value=mapping.selected}
-                local colours = coloursFromPaletteIndices(app.activeSprite.palettes[1], mapping.to[mapping.selected])
-                dlg:modify{id="to"..i, colors=colours}
-                dlg:modify{id="toSlider"..i, enabled=true}
-                dlg:modify{id="toRemoveRamp"..i, enabled=true}
-                dlg:modify{id="toClearRamps"..i, enabled=true}
-                dlg:modify{id="toAddColours"..i, enabled=true}
-                dlg:modify{id="toClearColours"..i, enabled=true}
-    end}
-            dlg:button{id="toRemoveRamp"..i, text="Remove Ramp", enabled=false, onclick=function()
-                if mapping.selected > 0 then
-                    table.remove(mapping.to, mapping.selected)
-                    dlg:modify{id="toSlider"..i, max=#mapping.to, value=math.max(mapping.selected, #mapping.to)}
-                    mapping.selected = dlg.data["toSlider"..i]
-                    local palette = app.activeSprite.palettes[1]
-                    local colours
-                    if mapping.selected == 0 then colours = {}
-                    else colours = coloursFromPaletteIndices(palette, mapping.to[mapping.selected]) end
-                    dlg:modify{id="to"..i, colors=colours}
-                    if #mapping.to == 0 then
-                        dlg:modify{id="toSlider"..i, enabled=false}
-                        dlg:modify{id="toClearRamps"..i, enabled=false}
-                        dlg:modify{id="toAddColours"..i, enabled=false}
-                        dlg:modify{id="toClearColours"..i, enabled=false}
-                    end
-                    dlg:modify{id="toRemoveRamp"..i, enabled=(mapping.selected > 0)}
-                end
+                updateDialogFromMappingIndex(i)
             end}
-            dlg:button{id="toClearRamps"..i, text="Clear Ramps", enabled=false, onclick=function()
+            dlg:button{id = "toRemoveRamp" .. i, text = "Remove Ramp", onclick = function()
+                table.remove(mapping.to, mapping.selected)
+                mapping.selected = math.min(mapping.selected, #mapping.to)
+                updateDialogFromMappingIndex(i)
+            end}
+            dlg:button{id = "toClearRamps" .. i, text = "Clear Ramps", onclick = function()
                 mapping.to = {}
                 mapping.selected = 0
-                dlg:modify{id="toSlider"..i, max=0, value=0}
-                dlg:modify{id="to"..i, colors={}}
-                dlg:modify{id="toSlider"..i, enabled=false}
-                dlg:modify{id="toRemoveRamp"..i, enabled=false}
-                dlg:modify{id="toClearRamps"..i, enabled=false}
-                dlg:modify{id="toAddColours"..i, enabled=false}
-                dlg:modify{id="toClearColours"..i, enabled=false}
+                updateDialogFromMappingIndex(i)
             end}
             dlg:newrow()
-            dlg:shades{id="to"..i, mode="sort", colors=mapping.to[mapping.selected], enabled=false, onclick=function()
+            dlg:shades{id = "to" .. i, mode="sort", colors=mapping.to[mapping.selected], onclick = function()
                 -- does not fire, need to manually update
                 -- if mapping.selected > 0 then
-                --     mapping.to[mapping.selected] = paletteIndicesFromColours(dlg.data["to"..i])
+                --     mapping.to[mapping.selected] = paletteIndicesFromColours(dlg.data["to" .. i])
                 -- end
             end}
-            dlg:button{id="toAddColours"..i, text="Add Colours", enabled=false, onclick=function()
-                if mapping.selected > 0 then
-                    appendTable(mapping.to[mapping.selected], selectedPaletteIndices())
-                    dlg:modify{id="to"..i, colors=coloursFromPaletteIndices(app.activeSprite.palettes[1], mapping.to[mapping.selected])}
-                    dlg:modify{id="to"..i, enabled=true}
-                    dlg:modify{id="toClearColours"..i, enabled=true}
-                end
+            dlg:button{id = "toAddColours" .. i, text = "Add Colours", onclick = function()
+                appendTable(mapping.to[mapping.selected], selectedPaletteIndices())
+                updateDialogFromMappingIndex(i)
             end}
-            dlg:button{id="toClearColours"..i, text="Clear Colours", enabled=false, onclick=function()
-                if mapping.selected > 0 then
-                    mapping.to[mapping.selected] = {}
-                    local palette = app.activeSprite.palettes[1]
-                    dlg:modify{id="to"..i, colors=coloursFromPaletteIndices(palette, mapping.to[mapping.selected])}
-                    dlg:modify{id="to"..i, enabled=false}
-                    dlg:modify{id="toClearColours"..i, enabled=false}
-                end
+            dlg:button{id = "toSelectColours" .. i, text = "Select Colours", onclick = function()
+                app.range.colors = mapping.to[mapping.selected]
+            end}
+            dlg:button{id = "toClearColours" .. i, text = "Clear Colours", onclick = function()
+                mapping.to[mapping.selected] = {}
+                updateDialogFromMappingIndex(i)
             end}
             dlg:separator()
-            dlg:button{text="Remove Mapping", onclick=function()
+            dlg:button{text = "Remove Mapping", onclick = function()
                 updateMappingsFromShades()
                 table.remove(mappings, i)
                 rebuildDialog()
             end}
         end
-        updateDialogFromMappings()
-        dlg:show{wait=false}
+        for i,mapping in ipairs(mappings) do
+            updateDialogFromMappingIndex(i)
+        end
+        dlg:show{wait = false}
+        if plugin.preferences["windowBounds"] ~= nil then
+            -- seems dialog bounds is buggy
+            -- dlg.bounds = Rectangle(plugin.preferences["windowBounds"])
+        end
     end
 
     plugin:newCommand{
-        id="Recolouriser",
+        id = "Recolouriser",
         title="Recolouriser...",
         group="edit_fx",
-        onclick=function()
-            if plugin.preferences.loadOnOpen then
+        onclick = function()
+            if plugin.preferences["loadOnOpen"] then
                 loadUserData()
             end
             buildDialog()
