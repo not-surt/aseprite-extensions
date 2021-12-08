@@ -33,8 +33,10 @@ function init(plugin)
         local palette = app.activeSprite.palettes[1]
         local rgbLut = {}
         if image.colorMode == ColorMode.RGB then
-            for i = 0,255 do
-                rgbLut[palette:getColor(i).rgbaPixel] = palette:getColor(lut[i]).rgbaPixel
+            for i = 0,math.min(255, #palette - 1) do
+                if lut[i] ~= nil then
+                    rgbLut[palette:getColor(i).rgbaPixel] = palette:getColor(lut[i]).rgbaPixel
+                end
             end
         end
         local function applyToPixelIndexed(it)
