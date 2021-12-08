@@ -125,52 +125,69 @@ function init(plugin)
         return nearestIndex
     end
 
-    local function buildDeleteColoursMapping(colourMode, palette, deleteIndices, replacementIndexFunc)
-        local removalSet = {}
-        for _, index in ipairs(deleteIndices) do
-            removalSet[index] = true
-        end
-        local newPalette = Palette(#palette - #deleteIndices)
-        local remapIndex = 0
-        for i = 0, #palette - 1 do
-            if removalSet[i] == nil then
-                newPalette:setColor(remapIndex, palette:getColor(i))
-                remapIndex = remapIndex + 1
-            end
-        end
-        local indexMapping = {}
-        remapIndex = 0
-        for i = 0, #palette - 1 do
-            if removalSet[i] == true then
-                indexMapping[i] = nil
-            else
-                indexMapping[i] = remapIndex
-                remapIndex = remapIndex + 1
-            end
-        end
-        local pixelValueMapping = {}
-        for i = 0, #palette - 1 do
-            local remapIndex = indexMapping[i]
-            if remapIndex ~= nil then
-                pixelValueMapping[indexPixelValue(colourMode, palette, i)] = indexPixelValue(colourMode, newPalette, remapIndex)
-            else
-                pixelValueMapping[indexPixelValue(colourMode, palette, i)] = replacementIndexFunc(indexMapping, palette, newPalette, i)
-            end
-        end
-        return pixelValueMapping, newPalette
-    end
-
-    local function buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping)
+    local function buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, unmappedIndexFunc)
         local pixelValueMapping = {}
         for i = 0, #palette - 1 do
             local pixelValue = indexPixelValue(colourMode, palette, i)
-            if pixelValue ~= nil then
+            local index = indexMapping[i]
+            if index ~= nil then
                 pixelValueMapping[pixelValue] = indexPixelValue(colourMode, palette, indexMapping[i])
+            elseif unmappedIndexFunc ~= nil then
+                pixelValueMapping[pixelValue] = unmappedIndexFunc(colourMode, palette, indexMapping, newPalette, i)
             end
         end
         return pixelValueMapping
     end
-    
+
+    local function paletteRemoveInsertMapping(palette, removeIndices, insertColours)
+        local removeIndicesSize = 0
+        local insertColoursSize = 0
+        if removeIndices ~= nil then
+            removeIndicesSize = #removeIndices
+            table.sort(removeIndices)
+        end
+        if insertColours ~= nil then
+            insertColoursSize = #insertColours
+            table.sort(insertColours, function(a, b)
+                return a.index < b.index
+            end)
+        end
+        local newPalette = Palette(#palette - removeIndicesSize + insertColoursSize)
+        local mapping = {}
+        local remapOffset = 0
+        local removeTableIndex = 1
+        local insertTableIndex = 1
+        for i = 0, #palette - 1 do
+            local removeIndex = nil
+            if removeIndices ~= nil then
+                removeIndex = removeIndices[removeTableIndex]
+            end
+            local insertIndex = nil
+            if insertColours ~= nil and insertColours[insertTableIndex] ~= nil then
+                insertIndex = insertColours[insertTableIndex].index
+            end
+            if i ~= removeIndex and i ~= insertIndex then
+                local remapIndex = i + remapOffset
+                newPalette:setColor(remapIndex, palette:getColor(i))
+                mapping[i] = remapIndex
+            else
+                if i == removeIndex then
+                    mapping[i] = nil
+                    remapOffset = remapOffset - 1
+                    removeTableIndex = removeTableIndex + 1
+                end
+                if i == insertIndex then
+                    local remapIndex = i + remapOffset
+                    newPalette:setColor(remapIndex, insertColours[insertTableIndex].colour)
+                    mapping[i] = remapIndex
+                    remapOffset = remapOffset + 1
+                    insertTableIndex = insertTableIndex + 1
+                end
+            end
+        end
+        return newPalette, mapping
+    end
+
     local DeleteMode = {
         REPLACE_WITH_NEAREST = "Replace With Nearest",
         REPLACE_WITH_INDEX = "Replace With Index",
@@ -178,18 +195,19 @@ function init(plugin)
     local function deleteIndices(sprite, cels, selection, indices, deleteMode, replacementIndex)
         local colourMode = sprite.colorMode
         local palette = sprite.palettes[1]
-        local replacementFunc = nil
+        local unmappedIndexFunc = nil
         if deleteMode == DeleteMode.REPLACE_WITH_NEAREST then
-            replacementFunc = function(indexMapping, palette, newPalette, i)
-                return findNearestColourIndex(newPalette, palette:getColor(i))
+            unmappedIndexFunc = function(colourMode, palette, indexMapping, newPalette, index)
+                return findNearestColourIndex(newPalette, palette:getColor(index))
             end
         elseif deleteMode == DeleteMode.REPLACE_WITH_INDEX then
-            replacementFunc = function(indexMapping, palette, newPalette, i)
+            unmappedIndexFunc = function(colourMode, palette, indexMapping, newPalette, index)
                 return indexMapping[replacementIndex]
             end
         end
-        if replacementFunc ~= nil then
-            local pixelValueMapping, newPalette = buildDeleteColoursMapping(colourMode, palette, indices, replacementFunc)
+        if unmappedIndexFunc ~= nil then
+            local newPalette, indexMapping = paletteRemoveInsertMapping(palette, indices, nil)
+            local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, unmappedIndexFunc)
             applyMappingInSelection(cels, selection, pixelValueMapping)
             sprite:setPalette(newPalette)
         end
@@ -260,7 +278,8 @@ function init(plugin)
                 palette:setColor(replacementIndex, averageColour)
             end
         end
-        local pixelValueMapping, newPalette = buildDeleteColoursMapping(colourMode, palette, deleteIndices, function(indexMapping, palette, newPalette, i)
+        local newPalette, indexMapping = paletteRemoveInsertMapping(palette, deleteIndices, nil)
+        local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, function(colourMode, palette, indexMapping, newPalette, i)
             return indexMapping[replacementIndex]
         end)
         applyMappingInSelection(cels, selection, pixelValueMapping)
@@ -271,7 +290,7 @@ function init(plugin)
         local dlg = Dialog("Palette Utils")
 
         dlg:separator{text = "Select Indices"}
-        dlg:number{id = "similarityThreshold", label = "Similarity Threshold", text = tostring(0)}
+        dlg:number{id = "selectSimilarityThreshold", label = "Similarity Threshold", text = tostring(0)}
         dlg:button{text = "Select Similar", onclick = function()
         end}
         dlg:number{id = "usageThreshold", label = "Usage Threshold", text = tostring(0)}
@@ -411,19 +430,15 @@ function init(plugin)
                     end
                 end
                 local colourMode = app.activeSprite.colorMode
-                local pixelValueMapping = {}
-                for i = 0, #palette - 1 do
-                    local remapIndex = indexMapping[i]
-                    if remapIndex ~= nil then
-                        pixelValueMapping[indexPixelValue(colourMode, palette, i)] = indexPixelValue(colourMode, newPalette, remapIndex)
-                    else
-                        -- pixelValueMapping[indexPixelValue(colourMode, palette, i)] = replacementIndexFunc(indexMapping, palette, newPalette, i)
-                    end
-                end
+                local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, nil)
                 applyMappingInSelection(app.range.cels, app.activeSprite.selection, pixelValueMapping)
                 app.activeSprite:setPalette(newPalette)
             end)
             app.refresh()
+        end}
+        dlg:number{id = "mergeSimilarityThreshold", label = "Similarity Threshold", text = tostring(0)}
+        dlg:combobox{id = "mergeMode", label = "Merge Mode", options = MergeMode, option = MergeMode.MOST_USED}
+        dlg:button{text = "Merge Similar", onclick = function()
         end}
 
         dlg:separator{text = "Reduce Indices"}
@@ -515,7 +530,7 @@ function init(plugin)
         dlg:newrow()
         dlg:number{id = "histogramWidth", label = "Histogram Size", text = tostring(256)}
         dlg:number{id = "histogramHeight", text = tostring(256)}
-        dlg:check{id = "histogramExcludeTransparent", label = "Histogram Exclude Transparent", value = false}
+        dlg:check{id = "histogramExcludeTransparent", text = "Histogram Exclude Transparent", value = false}
         dlg:button{text = "Show Histogram", onclick = function()
             app.transaction(function()
                 local palette = app.activeSprite.palettes[1]
@@ -541,9 +556,9 @@ function init(plugin)
                 local cel = sprite.cels[1]
                 local image = cel.image
                 for it in image:pixels() do
-                    local index = math.floor(it.x / xScale)
+                    local index = math.floor((it.x + 0.5) / xScale)
                     local colour
-                    if it.y > height - 1 - math.floor(counts[index] * yScale) then
+                    if (it.y + 0.5) > height - math.floor(counts[index] * yScale) then
                         colour = index
                     else
                         colour = bgIndex
