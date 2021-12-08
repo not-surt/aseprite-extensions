@@ -2,7 +2,7 @@
     "name": "Recolouriser",
     "displayName": "Recolouriser",
     "description": "Recolour image",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "author": { "name": "Carl Olsson", "email": "carl.olsson@gmail.com" },
     "contributors": [ "surt" ],
     "publisher": "surt",
