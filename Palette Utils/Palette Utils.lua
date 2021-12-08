@@ -188,19 +188,19 @@ function init(plugin)
         return newPalette, mapping
     end
 
-    local DeleteMode = {
+    local RemoveMode = {
         REPLACE_WITH_NEAREST = "Replace With Nearest",
         REPLACE_WITH_INDEX = "Replace With Index",
     }
-    local function deleteIndices(sprite, cels, selection, indices, deleteMode, replacementIndex)
+    local function removeIndices(sprite, cels, selection, indices, removeMode, replacementIndex)
         local colourMode = sprite.colorMode
         local palette = sprite.palettes[1]
         local unmappedIndexFunc = nil
-        if deleteMode == DeleteMode.REPLACE_WITH_NEAREST then
+        if removeMode == RemoveMode.REPLACE_WITH_NEAREST then
             unmappedIndexFunc = function(colourMode, palette, indexMapping, newPalette, index)
                 return findNearestColourIndex(newPalette, palette:getColor(index))
             end
-        elseif deleteMode == DeleteMode.REPLACE_WITH_INDEX then
+        elseif removeMode == RemoveMode.REPLACE_WITH_INDEX then
             unmappedIndexFunc = function(colourMode, palette, indexMapping, newPalette, index)
                 return indexMapping[replacementIndex]
             end
@@ -222,7 +222,7 @@ function init(plugin)
         local colourMode = sprite.colorMode
         local palette = sprite.palettes[1]
         local replacementIndex = nil
-        local deleteIndices = {}
+        local removeIndices = {}
         if mergeMode == MergeMode.MOST_USED then
             local indexCounts = indexCountsInSelection(colourMode, palette, cels, selection)
             local sortTable = {}
@@ -234,7 +234,7 @@ function init(plugin)
             end)
             replacementIndex = sortTable[#sortTable].index
             for i = 1, #sortTable - 1 do
-                table.insert(deleteIndices, sortTable[i].index)
+                table.insert(removeIndices, sortTable[i].index)
             end
         elseif mergeMode == MergeMode.AVERAGE then
             local sumR, sumG, sumB, sumA = 0, 0, 0, 0
@@ -247,12 +247,14 @@ function init(plugin)
                 sumA = sumA + colour.alpha
                 sumCount = sumCount + 1
             end
-            local averageColour = Color{red = math.floor(sumR / sumCount + 0.5), green = math.floor(sumG / sumCount + 0.5), blue = math.floor(sumB / sumCount + 0.5), alpha = math.floor(sumA / sumCount + 0.5)}
-            replacementIndex = indices[1]
-            for i = 2, #indices do
-                table.insert(deleteIndices, indices[i])
+            if sumCount > 0 then
+                local averageColour = Color{red = math.floor(sumR / sumCount + 0.5), green = math.floor(sumG / sumCount + 0.5), blue = math.floor(sumB / sumCount + 0.5), alpha = math.floor(sumA / sumCount + 0.5)}
+                replacementIndex = indices[1]
+                for i = 2, #indices do
+                    table.insert(removeIndices, indices[i])
+                end
+                palette:setColor(replacementIndex, averageColour)
             end
-            palette:setColor(replacementIndex, averageColour)
         elseif mergeMode == MergeMode.WEIGHTED_AVERAGE then
             local indexCounts = indexCountsInSelection(colourMode, palette, cels, selection)
             local selectedIndexCounts = {}
@@ -273,17 +275,59 @@ function init(plugin)
                 local averageColour = Color{red = math.floor(sumR / sumCount + 0.5), green = math.floor(sumG / sumCount + 0.5), blue = math.floor(sumB / sumCount + 0.5), alpha = math.floor(sumA / sumCount + 0.5)}
                 replacementIndex = indices[1]
                 for i = 2, #indices do
-                    table.insert(deleteIndices, indices[i])
+                    table.insert(removeIndices, indices[i])
                 end
                 palette:setColor(replacementIndex, averageColour)
             end
         end
-        local newPalette, indexMapping = paletteRemoveInsertMapping(palette, deleteIndices, nil)
+        local newPalette, indexMapping = paletteRemoveInsertMapping(palette, removeIndices, nil)
         local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, function(colourMode, palette, indexMapping, newPalette, i)
             return indexMapping[replacementIndex]
         end)
         applyMappingInSelection(cels, selection, pixelValueMapping)
         sprite:setPalette(newPalette)
+    end
+
+    local function getIndicesInUsageRange(colourMode, palette, cels, selection, min, max)
+        local indexCounts = indexCountsInSelection(colourMode, palette, cels, selection)
+        local indices = {}
+        for i, count in pairs(indexCounts) do
+            if count >= min and count < max then
+                table.insert(indices, i)
+            end
+        end
+        return indices
+    end
+
+    local function getIndicesNLeastUsed(colourMode, palette, cels, selection, n)
+        local indexCounts = indexCountsInSelection(colourMode, palette, cels, selection)
+        local sortTable = {}
+        for i = 0, #palette - 1 do
+            table.insert(sortTable, {index = i, count = indexCounts[i]})
+        end
+        table.sort(sortTable, function(a, b)
+            return a.count < b.count
+        end)
+        local leastUsedCount = math.min(n, #sortTable)
+        local indices = {}
+        for i = 1, leastUsedCount do
+            indices[i] = sortTable[i].index
+        end
+        return indices
+    end
+
+    local function getIndicesDuplicated(palette)
+        local rgbaValueSet = {}
+        local indices = {}
+        for i = 0, #palette - 1 do
+            local rgbaValue = palette:getColor(i).rgbaPixel
+            if rgbaValueSet[rgbaValue] == nil then
+                rgbaValueSet[rgbaValue] = true
+            else
+                table.insert(indices, i)
+            end
+        end
+        return indices
     end
 
     local function buildDialog()
@@ -296,71 +340,53 @@ function init(plugin)
         dlg:number{id = "usageThreshold", label = "Usage Threshold", text = tostring(0)}
         dlg:button{text = "Select Below Usage Threshold", onclick = function()
             app.transaction(function()
-                local palette = app.activeSprite.palettes[1]
-                local indexCounts = indexCountsInSelection(app.activeSprite.colorMode, palette, app.range.cels, app.activeSprite.selection)
-                local indices = {}
-                for i, count in pairs(indexCounts) do
-                    if count <= dlg.data["usageThreshold"] then
-                        table.insert(indices, i)
-                    end
-                end
-                app.range.colors = indices
+                app.range.colors = getIndicesInUsageRange(app.activeSprite.colorMode, app.activeSprite.palettes[1], app.range.cels, app.activeSprite.selection, 0, dlg.data["usageThreshold"])
             end)
             app.refresh()
         end}
+        dlg:newrow()
         dlg:number{id = "nLeastUsed", label = "N Least Used", text = tostring(0), decimals = 0}
         dlg:button{text = "Select N Least Used", onclick = function()
             app.transaction(function()
-                local palette = app.activeSprite.palettes[1]
-                local indexCounts = indexCountsInSelection(app.activeSprite.colorMode, palette, app.range.cels, app.activeSprite.selection)
-                local sortTable = {}
-                for i = 0, #palette - 1 do
-                    table.insert(sortTable, {index = i, count = indexCounts[i]})
-                end
-                table.sort(sortTable, function(a, b)
-                    return a.count < b.count
-                end)
-                local n = dlg.data["nLeastUsed"]
-                local leastUsedCount = math.min(n, #sortTable)
-                local leastUsedIndices = {}
-                for i = 1, leastUsedCount do
-                    leastUsedIndices[i] = sortTable[i].index
-                end
-                app.range.colors = leastUsedIndices
+                app.range.colors = getIndicesNLeastUsed(app.activeSprite.colorMode, app.activeSprite.palettes[1], app.range.cels, app.activeSprite.selection, dlg.data["nLeastUsed"])
             end)
             app.refresh()
         end}
         dlg:newrow()
         dlg:button{text = "Select Duplicates", onclick = function()
             app.transaction(function()
-                local palette = app.activeSprite.palettes[1]
-                local rgbaValueSet = {}
-                local duplicateIndices = {}
-                for i = 0, #palette - 1 do
-                    local rgbaValue = palette:getColor(i).rgbaPixel
-                    if rgbaValueSet[rgbaValue] == nil then
-                        rgbaValueSet[rgbaValue] = true
-                    else
-                        table.insert(duplicateIndices, i)
-                    end
-                end
-                app.range.colors = duplicateIndices
+                app.range.colors = getIndicesDuplicated(app.activeSprite.palettes[1])
+            end)
+            app.refresh()
+        end}
+        dlg:newrow()
+        dlg:button{text = "Invert Selection", onclick = function()
+            app.transaction(function()
             end)
             app.refresh()
         end}
 
-        dlg:separator{text = "Delete Indices"}
+        dlg:separator{text = "Remove Indices"}
         dlg:button{text = "Replace Pixels With Nearest", onclick = function()
             app.transaction(function()
-                deleteIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, DeleteMode.REPLACE_WITH_NEAREST)
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, RemoveMode.REPLACE_WITH_NEAREST)
             end)
             app.refresh()
         end}
+        dlg:newrow()
         dlg:color{id = "replacementColour", label = "Replacement Colour", color = 0}
         dlg:button{text = "Replace Pixels With Colour", onclick = function()
             app.transaction(function()
                 local replacementIndex = dlg.data["replacementColour"].index
-                deleteIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, DeleteMode.REPLACE_WITH_INDEX, replacementIndex)
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, RemoveMode.REPLACE_WITH_INDEX, replacementIndex)
+            end)
+            app.refresh()
+        end}
+        dlg:newrow()
+        dlg:button{text = "Remove Duplicates", onclick = function()
+            app.transaction(function()
+                local indices = getIndicesDuplicated(app.activeSprite.palettes[1])
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, indices, RemoveMode.REPLACE_WITH_NEAREST)
             end)
             app.refresh()
         end}
@@ -387,55 +413,6 @@ function init(plugin)
             app.refresh()
         end}
         dlg:newrow()
-        dlg:button{text = "Merge Duplicates", onclick = function()
-            app.transaction(function()
-                local palette = app.activeSprite.palettes[1]
-                local indices = app.range.colors
-                if #indices == 0 then
-                    indices = {}
-                    for i = 0, #palette - 1 do
-                        table.insert(indices, i)
-                    end
-                end
-                local duplicateGroups = {}
-                for _, index in pairs(indices) do
-                    local rgbaValue = palette:getColor(index).rgbaPixel
-                    if duplicateGroups[rgbaValue] == nil then
-                        duplicateGroups[rgbaValue] = {}
-                    end
-                    table.insert(duplicateGroups[rgbaValue], index)
-                end
-                local replacements = {}
-                local duplicateCount = 0
-                for _, duplicateGroup in pairs(duplicateGroups) do
-                    table.sort(duplicateGroup, function(a, b)
-                        return a < b
-                    end)
-                    duplicateCount = duplicateCount + #duplicateGroup - 1
-                    local keepIndex = duplicateGroup[1]
-                    for i = 2, #duplicateGroup do
-                        replacements[duplicateGroup[i]] = keepIndex
-                    end
-                end
-                local indexMapping = {}
-                local remapIndex = 0
-                local newPalette = Palette(#palette - duplicateCount)
-                for i = 0, #palette - 1 do
-                    if replacements[i] ~= nil then
-                        indexMapping[i] = replacements[i]
-                    else
-                        indexMapping[i] = remapIndex
-                        newPalette:setColor(remapIndex, palette:getColor(i))
-                        remapIndex = remapIndex + 1
-                    end
-                end
-                local colourMode = app.activeSprite.colorMode
-                local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, nil)
-                applyMappingInSelection(app.range.cels, app.activeSprite.selection, pixelValueMapping)
-                app.activeSprite:setPalette(newPalette)
-            end)
-            app.refresh()
-        end}
         dlg:number{id = "mergeSimilarityThreshold", label = "Similarity Threshold", text = tostring(0)}
         dlg:combobox{id = "mergeMode", label = "Merge Mode", options = MergeMode, option = MergeMode.MOST_USED}
         dlg:button{text = "Merge Similar", onclick = function()
@@ -468,7 +445,7 @@ function init(plugin)
         end}
 
         dlg:separator{text = "Add Indices"}
-        dlg:button{text = "All From Selection", onclick = function()
+        dlg:button{text = "All Colours From Selection", onclick = function()
             app.transaction(function()
                 local colourSequence, _ = coloursInSelection(app.range.cels, app.activeSprite.selection)
                 local palette = app.activeSprite.palettes[1]
@@ -502,6 +479,12 @@ function init(plugin)
                     palette:resize(paletteSize + 1)
                     palette:setColor(paletteSize, averageColour)
                 end
+            end)
+            app.refresh()
+        end}
+        dlg:newrow()
+        dlg:button{text = "All Pixels From Selection", onclick = function()
+            app.transaction(function()
             end)
             app.refresh()
         end}
