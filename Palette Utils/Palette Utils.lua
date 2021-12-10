@@ -12,6 +12,17 @@ function init(plugin)
     local function loadUserData()
     end
 
+    local function celSelectionOffsetBounds(cel, selection)
+        local image = cel.image
+        local bounds = Rectangle(0, 0, image.width, image.height)
+        local hasSelection = selection ~= nil and not selection.isEmpty
+        if hasSelection then
+            local offsetSelectionBounds = Rectangle(selection.bounds.x - cel.position.x, selection.bounds.y - cel.position.y, selection.bounds.width, selection.bounds.height)
+            bounds = bounds:intersect(offsetSelectionBounds)
+        end
+        return bounds
+    end
+
     local function perPixelInSelection(cels, selection, modifyPixels, func)
         for _, cel in ipairs(cels) do
             local image = cel.image
@@ -336,7 +347,49 @@ function init(plugin)
         dlg:separator{text = "Select Indices"}
         dlg:number{id = "selectSimilarityThreshold", label = "Similarity Threshold", text = tostring(0)}
         dlg:button{text = "Select Similar", onclick = function()
+            app.transaction(function()
+                local targetIndices = app.range.colors
+                local palette = app.activeSprite.palettes[1]
+                if #targetIndices == 0 then
+                    local colour = app.fgColor 
+                    local index = colour.index
+                    if index == nil then
+                        index = findNearestColourIndex(palette, colour)
+                    end
+                    table.insert(targetIndices, app.fgColor.index)
+                end
+                local targetIndicesSet = {}
+                for _, index in pairs(targetIndices) do
+                    targetIndicesSet[index] = true
+                end
+                local candidateIndices = {}
+                for i = 0, #palette - 1 do
+                    if targetIndicesSet[i] ~= true then
+                        table.insert(candidateIndices, i)
+                    end
+                end
+                local similarIndicesSet = {}
+                local thresholdSquared = dlg.data["selectSimilarityThreshold"] * dlg.data["selectSimilarityThreshold"]
+                for _, target in pairs(targetIndices) do
+                    for _, candidate in pairs(candidateIndices) do
+                        if similarIndicesSet[candidate] == nil then
+                            local distanceSquared = colourDistanceSquared(palette:getColor(candidate), palette:getColor(target))
+                            if distanceSquared < thresholdSquared then
+                                similarIndicesSet[candidate] = true
+                            end
+                        end
+                    end
+                end
+                local similarIndices = {}
+                for similar, _ in pairs(similarIndicesSet) do
+                    table.insert(similarIndices, similar)
+                end
+                app.range.colors = similarIndices
+                print("HERE!")
+            end)
+            app.refresh()
         end}
+        dlg:newrow()
         dlg:number{id = "usageThreshold", label = "Usage Threshold", text = tostring(0)}
         dlg:button{text = "Select Below Usage Threshold", onclick = function()
             app.transaction(function()
@@ -359,9 +412,61 @@ function init(plugin)
             end)
             app.refresh()
         end}
+        -- dlg:newrow()
+        -- dlg:button{text = "Select Pixels", onclick = function()
+        --     app.transaction(function()
+        --         local coloursSet = {}
+        --         for i, index in pairs(app.range.colors) do
+        --             coloursSet[index] = true
+        --         end
+        --         local selection = Selection()
+        --         local palette = app.activeSprite.palettes[1]
+        --         local lut = buildPixelValueToPaletteIndexLut(app.activeSprite.colorMode, palette)
+        --         local run = nil
+        --         perPixelInSelection(app.range.cels, app.activeSprite.selection, false, function(it)
+        --             local pixelValue = it()
+        --             local index = lut[pixelValue]
+        --             if coloursSet[index] ~= true or (run ~= nil and it.y ~= run.finish.y) then
+        --                 if run ~= nil then
+        --                     -- finish run
+        --                     local runWidth = run.finish.x - run.start.x + 1
+        --                     print(run.start.x, run.start.y, runWidth)
+        --                     local rect = Rectangle(run.start.x, run.start.y, runWidth, 1)
+        --                     selection:select(rect)
+        --                     run = nil
+        --                 end
+        --             else
+        --                 if run == nil then
+        --                     -- start run
+        --                     run = {}
+        --                     run.start = Point(it.x, it.y)
+        --                     run.finish = run.start
+        --                 else
+        --                     -- extend run
+        --                     run.finish = Point(it.x, it.y)
+        --                 end
+        --             end
+        --         end)
+        --         print(tostring(selection.bounds))
+        --         app.activeSprite.selection = selection
+        --         app.refresh()
+        --     end)
+        -- end}
         dlg:newrow()
         dlg:button{text = "Invert Selection", onclick = function()
             app.transaction(function()
+                local selectedSet = {}
+                for _, index in pairs(app.range.colors) do
+                    selectedSet[index] = true
+                end
+                local indices = {}
+                local palette = app.activeSprite.palettes[1]
+                for i = 0, #palette - 1 do
+                    if selectedSet[i] ~= true then
+                        table.insert(indices, i)
+                    end
+                end
+                app.range.colors = indices
             end)
             app.refresh()
         end}
@@ -425,8 +530,8 @@ function init(plugin)
             WEIGHTED_AVERAGE = "Replace With Weighted Average",
         }
         dlg:combobox{id = "reductionMode", label = "Reduction Mode", options = {ReductionMode.NEAREST, ReductionMode.AVERAGE, ReductionMode.WEIGHTED_AVERAGE}, option = ReductionMode.NEAREST}
-        dlg:number{id = "reductionSize", label = "Reduction Size", text = tostring(16)}
-        dlg:button{text = "Reduce to Size", onclick = function()
+        dlg:number{id = "reductionSize", label = "Reduce to Size", text = tostring(16)}
+        dlg:button{text = "Reduce", onclick = function()
             app.transaction(function()
                 local palette = app.activeSprite.palettes[1]
                 local reduceCount = #palette + 1 - dlg.data["reductionSize"]
@@ -483,8 +588,51 @@ function init(plugin)
             app.refresh()
         end}
         dlg:newrow()
+        dlg:button{text = "All Colours From Selected Grid Centres", onclick = function()
+            app.transaction(function()
+                for _, cel in ipairs(app.range.cels) do
+                    local selection = app.activeSprite.selection
+                    local bounds = celSelectionOffsetBounds(cel, selection)
+                    local grid = app.activeSprite.gridBounds
+                    local gridX0 = math.floor((bounds.x - grid.x) / grid.width)
+                    local gridY0 = math.floor((bounds.y - grid.y) / grid.height)
+                    local gridX1 = math.ceil((bounds.x - grid.x + bounds.width) / grid.width) - 1
+                    local gridY1 = math.ceil((bounds.y - grid.y + bounds.height) / grid.height) - 1
+                    local image = cel.image
+                    local colours = {}
+                    local count = 0
+                    for y = gridY0, gridY1 do
+                        for x = gridX0, gridX1 do
+                            local pos = Point(math.floor((x + 0.5) * grid.width + grid.x), math.floor((y + 0.5) * grid.height + grid.y))
+                            print(x, y, pos.x, pos.y)
+                            table.insert(colours, Color(image:getPixel(pos.x, pos.y)))
+                            count = count + 1
+                        end
+                    end
+                    print(count)
+                    local palette = app.activeSprite.palettes[1]
+                    local paletteSize = #palette
+                    palette:resize(paletteSize + #colours)
+                    for i = 1, #colours do
+                        palette:setColor(paletteSize - 1 + i, colours[i])
+                    end
+                end
+            end)
+            app.refresh()
+        end}
+        dlg:newrow()
         dlg:button{text = "All Pixels From Selection", onclick = function()
             app.transaction(function()
+                local colours = {}
+                perPixelInSelection(app.range.cels, app.activeSprite.selection, false, function(it)
+                    table.insert(colours, Color(it()))
+                end)
+                local palette = app.activeSprite.palettes[1]
+                local paletteSize = #palette
+                palette:resize(paletteSize + #colours)
+                for i = 1, #colours do
+                    palette:setColor(paletteSize - 1 + i, colours[i])
+                end
             end)
             app.refresh()
         end}
@@ -494,21 +642,6 @@ function init(plugin)
         dlg:button{text = "Count Colours Used", onclick = function()
             local colourSequence, _ = coloursInSelection(app.range.cels, app.activeSprite.selection)
             dlg:modify{id = "colourCount", text=tostring(#colourSequence)}
-        end}
-        dlg:newrow()
-        dlg:button{text = "Select Pixels", onclick = function()
-            local coloursSet = {}
-            for i, index in pairs(app.range.colors) do
-                coloursSet[index] = true
-            end
-            local selection = Selection()
-            perPixelInSelection(app.range.cels, app.activeSprite.selection, false, function(it)
-                local pixelValue = it()
-                local index = pixelValue ---------------------
-                if coloursSet[index] == true then
-                    
-                end
-            end)
         end}
         dlg:newrow()
         dlg:number{id = "histogramWidth", label = "Histogram Size", text = tostring(256)}
