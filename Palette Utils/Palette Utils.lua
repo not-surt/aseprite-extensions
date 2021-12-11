@@ -1,4 +1,5 @@
 local json = dofile("json.lua")
+local vivid = dofile("vivid.lua")
 
 function init(plugin)
     local defaults = {loadOnOpen = false, storeOnClose = false}
@@ -10,6 +11,130 @@ function init(plugin)
     local function storeUserData()
     end
     local function loadUserData()
+    end
+
+    local function tableInverse(table)
+        local inverse = {}
+        for key, value in pairs(table) do
+            inverse[value] = key
+        end
+        return inverse
+    end
+
+    local function byteToFloat(byteValue)
+        return byteValue / 256
+    end
+    local function floatToByte(floatValue)
+        if floatValue <= 0.0 then
+            return 0
+        elseif floatValue >= 1.0 then
+            return 255
+        else
+            return math.floor(floatValue * 256)
+        end
+    end
+    local function byteVectorToFloatVector(byteVector)
+        local floatVector = {}
+        for i = 1, #byteVector do
+            floatVector[i] = byteToFloat(byteVector[i])
+        end
+        return floatVector
+    end
+    local function floatVectorToByteVector(floatVector)
+        local byteVector = {}
+        for i = 1, #floatVector do
+            byteVector[i] = floatToByte(floatVector[i])
+        end
+        return byteVector
+    end
+    local function colourToFloatVector(colour)
+        return byteVectorToFloatVector({colour.red, colour.green, colour.blue, colour.alpha})
+    end
+    local function floatVectorToColour(floatVector)
+        local byteVector = floatVectorToByteVector(floatVector)
+        return Color{red = byteVector[1], green = byteVector[2], blue = byteVector[3], alpha = byteVector[4]}
+    end
+
+    local DistanceMetric = {
+        EUCLIDEAN = 0,
+        MANHATTAN = 1,
+        CHEBYSHEV = 2,
+    }
+    local distanceMetricLabels = {
+        [DistanceMetric.EUCLIDEAN] = "Euclidean",
+        [DistanceMetric.MANHATTAN] = "Manhattan",
+        [DistanceMetric.CHEBYSHEV] = "Chebyshev",
+    }
+    local distanceMetricLabelsInverted = tableInverse(distanceMetricLabels)
+    local ColourSpace = {
+        RGB = 0,
+        HSL = 1,
+        HSV = 2,
+        XYZ = 3,
+        LAB = 4,
+        LCH = 5,
+        LUV = 6,
+    }
+    local colourSpaceLabels = {
+        [ColourSpace.RGB] = "RGB",
+        [ColourSpace.HSL] = "HSL",
+        [ColourSpace.HSV] = "HSV",
+        [ColourSpace.XYZ] = "XYZ",
+        [ColourSpace.LAB] = "CIELAB",
+        [ColourSpace.LCH] = "CIELCh",
+        [ColourSpace.LUV] = "CIELUV",
+    }
+    local colourSpaceLabelsInverted = tableInverse(colourSpaceLabels)
+    local colourSpaceCodes = {
+        [ColourSpace.RGB] = "RGB",
+        [ColourSpace.HSL] = "HSL",
+        [ColourSpace.HSV] = "HSV",
+        [ColourSpace.XYZ] = "XYZ",
+        [ColourSpace.LAB] = "Lab",
+        [ColourSpace.LCH] = "LCH",
+        [ColourSpace.LUV] = "Luv",
+    }
+    local function colourConvert(fromColourSpace, toColourSpace, colourVector)
+        local funcName = colourSpaceCodes[fromColourSpace] .. "to" .. colourSpaceCodes[toColourSpace]
+        if vivid[funcName] ~= nil then
+            return {vivid[funcName](table.unpack(colourVector))}
+        else
+            return colourVector
+        end
+    end
+    local distanceElementFunc = {
+        [DistanceMetric.EUCLIDEAN] = function(sum, a, b)
+            return sum + (b - a) ^ 2
+        end,
+        [DistanceMetric.MANHATTAN] = function(sum, a, b)
+            return sum + math.abs(b - a)
+        end,
+        [DistanceMetric.CHEBYSHEV] = function(sum, a, b)
+            return math.max(sum, math.abs(b - a))
+        end,
+    }
+    local distanceSumFunc = {
+        [DistanceMetric.EUCLIDEAN] = function(sum, relative)
+            if relative ~= true then
+                return math.sqrt(sum)
+            end
+        end
+    }
+    local function distance(metric, a, b, relative)
+        local sum = 0
+        local elementCount = math.min(#a, #b)
+        for i = 1, elementCount do
+            sum = distanceElementFunc[metric](sum, a[i], b[i])
+        end
+        if distanceSumFunc[metric] ~= nil then
+            sum = distanceSumFunc[metric](sum, relative)
+        end
+        return sum
+    end
+    local function colourDistance(metric, colourSpace, a, b, relative)
+        local convertedA = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(a))
+        local convertedB = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(b))
+        return distance(metric, convertedA, convertedB, relative)
     end
 
     local function celSelectionOffsetBounds(cel, selection)
@@ -26,13 +151,9 @@ function init(plugin)
     local function perPixelInSelection(cels, selection, modifyPixels, func)
         for _, cel in ipairs(cels) do
             local image = cel.image
-            local bounds = Rectangle(0, 0, image.width, image.height)
+            local bounds = celSelectionOffsetBounds(cel, selection)
             local hasSelection = selection ~= nil and not selection.isEmpty
-            if hasSelection then
-                local offsetSelectionBounds = Rectangle(selection.bounds.x - cel.position.x, selection.bounds.y - cel.position.y, selection.bounds.width, selection.bounds.height)
-                bounds = bounds:intersect(offsetSelectionBounds)
-            end
-            if bounds.width > 0 and bounds.height > 0 then
+            if not bounds.isEmpty then
                 if modifyPixels == true then
                     image = Image(cel.image)
                 end
@@ -111,7 +232,7 @@ function init(plugin)
         return indexCounts
     end
 
-    local function colourDistanceSquared(a, b)
+    local function colourDistanceEuclideanSquared(a, b)
         local deltaR = b.red - a.red
         local deltaG = b.green - a.green
         local deltaB = b.blue - a.blue
@@ -119,15 +240,16 @@ function init(plugin)
         return deltaR * deltaR + deltaG * deltaG + deltaB * deltaB + deltaA * deltaA
     end
 
-    local function colourDistance(a, b)
-        return math.sqrt(colourDistanceSquared(a, b))
+    local function colourDistanceEuclidean(a, b)
+        return math.sqrt(colourDistanceEuclideanSquared(a, b))
     end
 
-    local function findNearestColourIndex(palette, colour)
+    local function findNearestColourIndex(metric, colourSpace, palette, colour)
         local nearestIndex = nil
         local nearestDistance = nil
         for i = 0, #palette - 1 do
-            local distance = colourDistanceSquared(colour, palette:getColor(i))
+            local distance = colourDistance(metric, colourSpace, colour, palette:getColor(i), false)
+            -- local distance = colourDistanceEuclideanSquared(colour, palette:getColor(i))
             if nearestIndex == nil or distance < nearestDistance then
                 nearestIndex = i
                 nearestDistance = distance
@@ -200,16 +322,20 @@ function init(plugin)
     end
 
     local RemoveMode = {
-        REPLACE_WITH_NEAREST = "Replace With Nearest",
-        REPLACE_WITH_INDEX = "Replace With Index",
+        REPLACE_WITH_NEAREST = 0,
+        REPLACE_WITH_INDEX = 1,
     }
-    local function removeIndices(sprite, cels, selection, indices, removeMode, replacementIndex)
+    local removeModeLabels = {
+        [RemoveMode.REPLACE_WITH_NEAREST] = "Replace With Nearest",
+        [RemoveMode.REPLACE_WITH_INDEX] = "Replace With Index",
+    }
+    local function removeIndices(sprite, cels, selection, indices, removeMode, distanceMetric, colourSpace, replacementIndex)
         local colourMode = sprite.colorMode
         local palette = sprite.palettes[1]
         local unmappedIndexFunc = nil
         if removeMode == RemoveMode.REPLACE_WITH_NEAREST then
             unmappedIndexFunc = function(colourMode, palette, indexMapping, newPalette, index)
-                return findNearestColourIndex(newPalette, palette:getColor(index))
+                return findNearestColourIndex(distanceMetric, colourSpace, newPalette, palette:getColor(index))
             end
         elseif removeMode == RemoveMode.REPLACE_WITH_INDEX then
             unmappedIndexFunc = function(colourMode, palette, indexMapping, newPalette, index)
@@ -225,11 +351,17 @@ function init(plugin)
     end
 
     local MergeMode = {
-        MOST_USED = "Merge to Most Used",
-        AVERAGE = "Merge to Average",
-        WEIGHTED_AVERAGE = "Merge to Weighted Average",
+        MOST_USED = 0,
+        AVERAGE = 1,
+        WEIGHTED_AVERAGE = 2,
     }
-    local function mergeIndices(sprite, cels, selection, indices, mergeMode)
+    local mergeModeLabels = {
+        [MergeMode.MOST_USED] = "Merge to Most Used",
+        [MergeMode.AVERAGE] = "Merge to Average",
+        [MergeMode.WEIGHTED_AVERAGE] = "Merge to Weighted Average",
+    }
+    local mergeModeLabelsInverted = tableInverse(mergeModeLabels)
+    local function mergeIndices(sprite, cels, selection, indices, mergeMode, distanceMetric, colourSpace)
         local colourMode = sprite.colorMode
         local palette = sprite.palettes[1]
         local replacementIndex = nil
@@ -249,17 +381,22 @@ function init(plugin)
             end
         elseif mergeMode == MergeMode.AVERAGE then
             local sumR, sumG, sumB, sumA = 0, 0, 0, 0
+            local sums = {0, 0, 0, 0}
             local sumCount = 0
             for _, index in pairs(indices) do
                 local colour = palette:getColor(index)
-                sumR = sumR + colour.red
-                sumG = sumG + colour.green
-                sumB = sumB + colour.blue
-                sumA = sumA + colour.alpha
+                local converted = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(colour))
+                for i = 1, #sums do
+                    sums[i] = sums[i] + converted[i]
+                end
                 sumCount = sumCount + 1
             end
             if sumCount > 0 then
-                local averageColour = Color{red = math.floor(sumR / sumCount + 0.5), green = math.floor(sumG / sumCount + 0.5), blue = math.floor(sumB / sumCount + 0.5), alpha = math.floor(sumA / sumCount + 0.5)}
+                local convertedAverage = {0, 0, 0, 0}
+                for i = 1, #convertedAverage do
+                    convertedAverage[i] = sums[i] / sumCount
+                end
+                local averageColour = floatVectorToColour(colourConvert(colourSpace, ColourSpace.RGB, convertedAverage))
                 replacementIndex = indices[1]
                 for i = 2, #indices do
                     table.insert(removeIndices, indices[i])
@@ -273,17 +410,22 @@ function init(plugin)
                 selectedIndexCounts[index] = indexCounts[index]
             end
             local sumR, sumG, sumB, sumA = 0, 0, 0, 0
+            local sums = {0, 0, 0, 0}
             local sumCount = 0
             for index, count in pairs(selectedIndexCounts) do
                 local colour = palette:getColor(index)
-                sumR = sumR + colour.red * count
-                sumG = sumG + colour.green * count
-                sumB = sumB + colour.blue * count
-                sumA = sumA + colour.alpha * count
+                local converted = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(colour))
+                for i = 1, #sums do
+                    sums[i] = sums[i] + converted[i] * count
+                end
                 sumCount = sumCount + count
             end
             if sumCount > 0 then
-                local averageColour = Color{red = math.floor(sumR / sumCount + 0.5), green = math.floor(sumG / sumCount + 0.5), blue = math.floor(sumB / sumCount + 0.5), alpha = math.floor(sumA / sumCount + 0.5)}
+                local convertedAverage = {0, 0, 0, 0}
+                for i = 1, #convertedAverage do
+                    convertedAverage[i] = sums[i] / sumCount
+                end
+                local averageColour = floatVectorToColour(colourConvert(colourSpace, ColourSpace.RGB, convertedAverage))
                 replacementIndex = indices[1]
                 for i = 2, #indices do
                     table.insert(removeIndices, indices[i])
@@ -345,16 +487,20 @@ function init(plugin)
         local dlg = Dialog("Palette Utils")
 
         dlg:separator{text = "Select Indices"}
+        dlg:combobox{id = "distanceMetric", label = "Distance Metric", options = distanceMetricLabels, option = distanceMetricLabels[DistanceMetric.EUCLIDEAN]}
+        dlg:combobox{id = "colourSpace", label = "Colour Space", options = colourSpaceLabels, option = colourSpaceLabels[ColourSpace.RGB]}
         dlg:number{id = "selectSimilarityThreshold", label = "Similarity Threshold", text = tostring(0)}
         dlg:button{text = "Select Similar", onclick = function()
             app.transaction(function()
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local targetIndices = app.range.colors
                 local palette = app.activeSprite.palettes[1]
                 if #targetIndices == 0 then
                     local colour = app.fgColor 
                     local index = colour.index
                     if index == nil then
-                        index = findNearestColourIndex(palette, colour)
+                        index = findNearestColourIndex(distanceMetric, colourSpace, palette, colour)
                     end
                     table.insert(targetIndices, app.fgColor.index)
                 end
@@ -369,11 +515,11 @@ function init(plugin)
                     end
                 end
                 local similarIndicesSet = {}
-                local thresholdSquared = dlg.data["selectSimilarityThreshold"] * dlg.data["selectSimilarityThreshold"]
+                local thresholdSquared = dlg.data["selectSimilarityThreshold"] ^ 2
                 for _, target in pairs(targetIndices) do
                     for _, candidate in pairs(candidateIndices) do
                         if similarIndicesSet[candidate] == nil then
-                            local distanceSquared = colourDistanceSquared(palette:getColor(candidate), palette:getColor(target))
+                            local distanceSquared = colourDistanceEuclideanSquared(palette:getColor(candidate), palette:getColor(target))
                             if distanceSquared < thresholdSquared then
                                 similarIndicesSet[candidate] = true
                             end
@@ -385,7 +531,6 @@ function init(plugin)
                     table.insert(similarIndices, similar)
                 end
                 app.range.colors = similarIndices
-                print("HERE!")
             end)
             app.refresh()
         end}
@@ -474,7 +619,9 @@ function init(plugin)
         dlg:separator{text = "Remove Indices"}
         dlg:button{text = "Replace Pixels With Nearest", onclick = function()
             app.transaction(function()
-                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, RemoveMode.REPLACE_WITH_NEAREST)
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, RemoveMode.REPLACE_WITH_NEAREST, distanceMetric, colourSpace)
             end)
             app.refresh()
         end}
@@ -482,72 +629,91 @@ function init(plugin)
         dlg:color{id = "replacementColour", label = "Replacement Colour", color = 0}
         dlg:button{text = "Replace Pixels With Colour", onclick = function()
             app.transaction(function()
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local replacementIndex = dlg.data["replacementColour"].index
-                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, RemoveMode.REPLACE_WITH_INDEX, replacementIndex)
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, RemoveMode.REPLACE_WITH_INDEX, distanceMetric, colourSpace, replacementIndex)
             end)
             app.refresh()
         end}
         dlg:newrow()
         dlg:button{text = "Remove Duplicates", onclick = function()
             app.transaction(function()
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local indices = getIndicesDuplicated(app.activeSprite.palettes[1])
-                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, indices, RemoveMode.REPLACE_WITH_NEAREST)
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, indices, RemoveMode.REPLACE_WITH_NEAREST, distanceMetric, colourSpace)
             end)
             app.refresh()
         end}
 
         dlg:separator{text = "Merge Indices"}
-        dlg:button{text = "Merge to Most Used", onclick = function()
+        dlg:combobox{id = "mergeMode", label = "Merge Mode", options = mergeModeLabels, option = mergeModeLabels[MergeMode.MOST_USED]}
+        dlg:button{text = "Merge Selected", onclick = function()
             app.transaction(function()
-                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.MOST_USED)
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                local mergeMode = mergeModeLabelsInverted[dlg.data["mergeMode"]]
+                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, mergeMode, distanceMetric, colourSpace)
             end)
             app.refresh()
         end}
-        dlg:newrow()
-        dlg:button{text = "Merge to Average", onclick = function()
-            app.transaction(function()
-                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.AVERAGE)
-            end)
-            app.refresh()
-        end}
-        dlg:newrow()
-        dlg:button{text = "Merge to Weighted Average", onclick = function()
-            app.transaction(function()
-                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.WEIGHTED_AVERAGE)
-            end)
-            app.refresh()
-        end}
+        -- dlg:button{text = "Merge to Most Used", onclick = function()
+        --     app.transaction(function()
+        --         mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.MOST_USED)
+        --     end)
+        --     app.refresh()
+        -- end}
+        -- dlg:newrow()
+        -- dlg:button{text = "Merge to Average", onclick = function()
+        --     app.transaction(function()
+        --         mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.AVERAGE)
+        --     end)
+        --     app.refresh()
+        -- end}
+        -- dlg:newrow()
+        -- dlg:button{text = "Merge to Weighted Average", onclick = function()
+        --     app.transaction(function()
+        --         mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.WEIGHTED_AVERAGE)
+        --     end)
+        --     app.refresh()
+        -- end}
         dlg:newrow()
         dlg:number{id = "mergeSimilarityThreshold", label = "Similarity Threshold", text = tostring(0)}
-        dlg:combobox{id = "mergeMode", label = "Merge Mode", options = MergeMode, option = MergeMode.MOST_USED}
         dlg:button{text = "Merge Similar", onclick = function()
         end}
 
-        dlg:separator{text = "Reduce Indices"}
-        local ReductionMode = {
-            NEAREST = "Replace With Nearest",
-            AVERAGE = "Replace With Average",
-            WEIGHTED_AVERAGE = "Replace With Weighted Average",
-        }
-        dlg:combobox{id = "reductionMode", label = "Reduction Mode", options = {ReductionMode.NEAREST, ReductionMode.AVERAGE, ReductionMode.WEIGHTED_AVERAGE}, option = ReductionMode.NEAREST}
-        dlg:number{id = "reductionSize", label = "Reduce to Size", text = tostring(16)}
-        dlg:button{text = "Reduce", onclick = function()
-            app.transaction(function()
-                local palette = app.activeSprite.palettes[1]
-                local reduceCount = #palette + 1 - dlg.data["reductionSize"]
-                local indices = {}
-                -- select reduceCount least used indices
-                local reductionMode = dlg.data["reductionMode"]
-                if reductionMode == ReductionMode.NEAREST then
+        -- dlg:separator{text = "Reduce Indices"}
+        -- local ReductionMode = {
+        --     NEAREST = 0,
+        --     AVERAGE = 1,
+        --     WEIGHTED_AVERAGE = 2,
+        -- }
+        -- local reductionModeLabels = {
+        --     [ReductionMode.NEAREST] = "Replace With Nearest",
+        --     [ReductionMode.AVERAGE] = "Replace With Average",
+        --     [ReductionMode.WEIGHTED_AVERAGE] = "Replace With Weighted Average",
+        -- }
+        -- dlg:combobox{id = "reductionMode", label = "Reduction Mode", options = reductionModeLabels, option = reductionModeLabels[ReductionMode.NEAREST]}
+        -- dlg:number{id = "reductionSize", label = "Reduce to Size", text = tostring(16)}
+        -- dlg:button{text = "Reduce", onclick = function()
+        --     app.transaction(function()
+        --         local palette = app.activeSprite.palettes[1]
+        --         local reduceCount = #palette + 1 - dlg.data["reductionSize"]
+        --         local indices = {}
+        --         -- select reduceCount least used indices
+        --         local reductionModeLabelsInverted = tableInverse(reductionModeLabels)
+        --         local reductionMode = reductionModeLabelsInverted[dlg.data["reductionMode"]]
+        --         if reductionMode == ReductionMode.NEAREST then
 
-                elseif reductionMode == ReductionMode.AVERAGE then
+        --         elseif reductionMode == ReductionMode.AVERAGE then
 
-                elseif reductionMode == ReductionMode.WEIGHTED_AVERAGE then
+        --         elseif reductionMode == ReductionMode.WEIGHTED_AVERAGE then
 
-                end
-            end)
-            app.refresh()
-        end}
+        --         end
+        --     end)
+        --     app.refresh()
+        -- end}
 
         dlg:separator{text = "Add Indices"}
         dlg:button{text = "All Colours From Selection", onclick = function()
@@ -604,12 +770,10 @@ function init(plugin)
                     for y = gridY0, gridY1 do
                         for x = gridX0, gridX1 do
                             local pos = Point(math.floor((x + 0.5) * grid.width + grid.x), math.floor((y + 0.5) * grid.height + grid.y))
-                            print(x, y, pos.x, pos.y)
                             table.insert(colours, Color(image:getPixel(pos.x, pos.y)))
                             count = count + 1
                         end
                     end
-                    print(count)
                     local palette = app.activeSprite.palettes[1]
                     local paletteSize = #palette
                     palette:resize(paletteSize + #colours)
