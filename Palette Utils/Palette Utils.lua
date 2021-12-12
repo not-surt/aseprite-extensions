@@ -12,6 +12,17 @@ function init(plugin)
     local function clamp(min, max, value)
         return math.max(min, math.min(max, value))
     end
+    local function wrap(min, max, value)
+        local range = max - min
+        if range == 0.0 then
+            return min
+        else
+            local offsetValue = value - min
+            local quotient = math.floor(offsetValue / range)
+            local remainder = offsetValue - quotient * range
+            return min + remainder
+        end
+    end
 
     local function byteToFloat(byteValue)
         return byteValue / 256
@@ -62,9 +73,9 @@ function init(plugin)
         LUV = 6,
     }
     local colourSpacePolarComponents = {
-        [ColourSpace.HSL] = {[3] = true},
-        [ColourSpace.HSV] = {[3] = true},
-        [ColourSpace.LCH] = {[3] = true},
+        [ColourSpace.HSL] = {[1] = true},
+        [ColourSpace.HSV] = {[1] = true},
+        -- [ColourSpace.LCH] = {[3] = true},
     }
     local colourSpaceLabels = {
         [ColourSpace.RGB] = "RGB",
@@ -123,6 +134,7 @@ function init(plugin)
         return sum
     end
     local function colourDistance(metric, colourSpace, a, b, relative)
+        -- TODO hande polar cordinates
         local convertedA = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(a))
         local convertedB = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(b))
         return distance(metric, convertedA, convertedB, relative) * 256
@@ -164,17 +176,22 @@ function init(plugin)
         end,
     }
     local function interpolateValue(interpolationMethod, a, b, pos, polar)
+        local posMethod = interpolateFunc[interpolationMethod](clamp(0, 1, pos))
         if polar == true then
-            local deltaPos = math.abs(b - a)
-            local deltaNeg = math.abs((1.0 - b) - (1.0 - a))
-            if deltaNeg < deltaPos then
-                print("!!!!")----------------------------------
-                a = 1.0 - a
-                b = 1.0 - b
-                pos = 1.0 - pos
+            local difference = math.abs(b - a)
+            local offsetA = 0.0
+            local offsetB = 0.0
+            if difference > 0.5 then
+                if a < b then
+                    offsetB = -1.0
+                else
+                    offsetA = -1.0
+                end
             end
+            return wrap(0.0, 1.0, lerp(a + offsetA, b + offsetB, posMethod))
+        else
+            return lerp(a, b, posMethod)
         end
-        return lerp(a, b, interpolateFunc[interpolationMethod](clamp(0, 1, pos)))
     end
     local function interpolateVector(interpolationMethod, a, b, pos, polarComponents)
         local vector = {}
@@ -651,46 +668,45 @@ function init(plugin)
             end)
             app.refresh()
         end}
-        -- dlg:newrow()
-        -- dlg:button{text = "Select Pixels", onclick = function()
-        --     app.transaction(function()
-        --         local coloursSet = {}
-        --         for i, index in pairs(app.range.colors) do
-        --             coloursSet[index] = true
-        --         end
-        --         local selection = Selection()
-        --         local palette = app.activeSprite.palettes[1]
-        --         local lut = buildPixelValueToPaletteIndexLut(app.activeSprite.colorMode, palette)
-        --         local run = nil
-        --         perPixelInSelection(app.range.cels, app.activeSprite.selection, false, function(it)
-        --             local pixelValue = it()
-        --             local index = lut[pixelValue]
-        --             if coloursSet[index] ~= true or (run ~= nil and it.y ~= run.finish.y) then
-        --                 if run ~= nil then
-        --                     -- finish run
-        --                     local runWidth = run.finish.x - run.start.x + 1
-        --                     print(run.start.x, run.start.y, runWidth)
-        --                     local rect = Rectangle(run.start.x, run.start.y, runWidth, 1)
-        --                     selection:select(rect)
-        --                     run = nil
-        --                 end
-        --             else
-        --                 if run == nil then
-        --                     -- start run
-        --                     run = {}
-        --                     run.start = Point(it.x, it.y)
-        --                     run.finish = run.start
-        --                 else
-        --                     -- extend run
-        --                     run.finish = Point(it.x, it.y)
-        --                 end
-        --             end
-        --         end)
-        --         print(tostring(selection.bounds))
-        --         app.activeSprite.selection = selection
-        --         app.refresh()
-        --     end)
-        -- end}
+        dlg:button{text = "Select Pixels", enabled = false, onclick = function()
+            app.transaction(function()
+                local coloursSet = {}
+                for i, index in pairs(app.range.colors) do
+                    coloursSet[index] = true
+                end
+                local selection = Selection()
+                local palette = app.activeSprite.palettes[1]
+                local lut = buildPixelValueToPaletteIndexLut(app.activeSprite.colorMode, palette)
+                local run = nil
+                perPixelInSelection(app.range.cels, app.activeSprite.selection, false, function(it)
+                    local pixelValue = it()
+                    local index = lut[pixelValue]
+                    if coloursSet[index] ~= true or (run ~= nil and it.y ~= run.finish.y) then
+                        if run ~= nil then
+                            -- finish run
+                            local runWidth = run.finish.x - run.start.x + 1
+                            print(run.start.x, run.start.y, runWidth)
+                            local rect = Rectangle(run.start.x, run.start.y, runWidth, 1)
+                            selection:select(rect)
+                            run = nil
+                        end
+                    else
+                        if run == nil then
+                            -- start run
+                            run = {}
+                            run.start = Point(it.x, it.y)
+                            run.finish = run.start
+                        else
+                            -- extend run
+                            run.finish = Point(it.x, it.y)
+                        end
+                    end
+                end)
+                print(tostring(selection.bounds))
+                app.activeSprite.selection = selection
+                app.refresh()
+            end)
+        end}
 
         dlg:separator{text = "Remove Indices"}
         dlg:button{text = "Replace With Nearest", onclick = function()
