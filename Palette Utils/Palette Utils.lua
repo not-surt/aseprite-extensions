@@ -1,18 +1,6 @@
-local json = dofile("json.lua")
 local vivid = dofile("vivid.lua")
 
 function init(plugin)
-    local defaults = {loadOnOpen = false, storeOnClose = false}
-    if plugin.preferences == nil then plugin.preferences = {} end
-    for key, value in pairs(defaults) do
-        if plugin.preferences[key] == nil then plugin.preferences[key] = value end
-    end
-
-    local function storeUserData()
-    end
-    local function loadUserData()
-    end
-
     local function tableInverse(table)
         local inverse = {}
         for key, value in pairs(table) do
@@ -20,18 +8,16 @@ function init(plugin)
         end
         return inverse
     end
+    
+    local function clamp(min, max, value)
+        return math.max(min, math.min(max, value))
+    end
 
     local function byteToFloat(byteValue)
         return byteValue / 256
     end
     local function floatToByte(floatValue)
-        if floatValue <= 0.0 then
-            return 0
-        elseif floatValue >= 1.0 then
-            return 255
-        else
-            return math.floor(floatValue * 256)
-        end
+        return clamp(0, 255, math.floor(floatValue * 256))
     end
     local function byteVectorToFloatVector(byteVector)
         local floatVector = {}
@@ -74,6 +60,11 @@ function init(plugin)
         LAB = 4,
         LCH = 5,
         LUV = 6,
+    }
+    local colourSpacePolarComponents = {
+        [ColourSpace.HSL] = {[3] = true},
+        [ColourSpace.HSV] = {[3] = true},
+        [ColourSpace.LCH] = {[3] = true},
     }
     local colourSpaceLabels = {
         [ColourSpace.RGB] = "RGB",
@@ -134,7 +125,85 @@ function init(plugin)
     local function colourDistance(metric, colourSpace, a, b, relative)
         local convertedA = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(a))
         local convertedB = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(b))
-        return distance(metric, convertedA, convertedB, relative)
+        return distance(metric, convertedA, convertedB, relative) * 256
+    end
+
+    local function lerp(a, b, pos)
+        return (b - a) * pos + a
+    end
+    local InterpolationMethod = {
+        CONSTANT = 0,
+        LINEAR = 1,
+        COSINE = 2,
+        SMOOTHSTEP = 3,
+        SMOOTHERSTEP = 4,
+    }
+    local interpolationMethodLabels = {
+        [InterpolationMethod.CONSTANT] = "Constant",
+        [InterpolationMethod.LINEAR] = "Linear",
+        [InterpolationMethod.COSINE] = "Cosine",
+        [InterpolationMethod.SMOOTHSTEP] = "Smoothstep",
+        [InterpolationMethod.SMOOTHERSTEP] = "Smootherstep",
+    }
+    local interpolationMethodLabelsInverted = tableInverse(interpolationMethodLabels)
+    local interpolateFunc = {
+        [InterpolationMethod.CONSTANT] = function(pos)
+            return 0
+        end,
+        [InterpolationMethod.LINEAR] = function(pos)
+            return pos
+        end,
+        [InterpolationMethod.COSINE] = function(pos)
+            return  0.5 - math.cos(-pos * math.pi) * 0.5
+        end,
+        [InterpolationMethod.SMOOTHSTEP] = function(pos)
+            return pos^2 * (3 - 2 * pos)
+        end,
+        [InterpolationMethod.SMOOTHERSTEP] = function(pos)
+            return pos^3 * (pos * (pos * 6 - 15) + 10)
+        end,
+    }
+    local function interpolateValue(interpolationMethod, a, b, pos, polar)
+        if polar == true then
+            local deltaPos = math.abs(b - a)
+            local deltaNeg = math.abs((1.0 - b) - (1.0 - a))
+            if deltaNeg < deltaPos then
+                print("!!!!")----------------------------------
+                a = 1.0 - a
+                b = 1.0 - b
+                pos = 1.0 - pos
+            end
+        end
+        return lerp(a, b, interpolateFunc[interpolationMethod](clamp(0, 1, pos)))
+    end
+    local function interpolateVector(interpolationMethod, a, b, pos, polarComponents)
+        local vector = {}
+        for i = 1, #a do
+            local polar = false
+            if polarComponents ~= nil and polarComponents[i] == true then
+                polar = true
+            end
+            vector[i] = interpolateValue(interpolationMethod, a[i], b[i], pos, polar)
+        end
+        return vector
+    end
+    local function interpolateColour(interpolationMethod, colourSpace, a, b, pos)
+        local convertedA = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(a))
+        local convertedB = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(b))
+        local interpolated = interpolateVector(interpolationMethod, convertedA, convertedB, pos, colourSpacePolarComponents[colourSpace])
+        local convertedInterpolated = colourConvert(colourSpace, ColourSpace.RGB, interpolated)
+        return floatVectorToColour(convertedInterpolated)
+    end
+    local function rampIndices(colourSpace, interpolationMethod, palette, indices)
+        local colour0 = palette:getColor(indices[1])
+        local colour1 = palette:getColor(indices[#indices])
+        local step = 1.0 / (#indices - 1)
+        local pos = step
+        for i = 2, #indices - 1 do
+            local colour = interpolateColour(interpolationMethod, colourSpace, colour0, colour1, pos)
+            palette:setColor(indices[i], colour)
+            pos = pos + step
+        end
     end
 
     local function celSelectionOffsetBounds(cel, selection)
@@ -232,24 +301,11 @@ function init(plugin)
         return indexCounts
     end
 
-    local function colourDistanceEuclideanSquared(a, b)
-        local deltaR = b.red - a.red
-        local deltaG = b.green - a.green
-        local deltaB = b.blue - a.blue
-        local deltaA = b.alpha - a.alpha
-        return deltaR * deltaR + deltaG * deltaG + deltaB * deltaB + deltaA * deltaA
-    end
-
-    local function colourDistanceEuclidean(a, b)
-        return math.sqrt(colourDistanceEuclideanSquared(a, b))
-    end
-
     local function findNearestColourIndex(metric, colourSpace, palette, colour)
         local nearestIndex = nil
         local nearestDistance = nil
         for i = 0, #palette - 1 do
             local distance = colourDistance(metric, colourSpace, colour, palette:getColor(i), false)
-            -- local distance = colourDistanceEuclideanSquared(colour, palette:getColor(i))
             if nearestIndex == nil or distance < nearestDistance then
                 nearestIndex = i
                 nearestDistance = distance
@@ -380,7 +436,6 @@ function init(plugin)
                 table.insert(removeIndices, sortTable[i].index)
             end
         elseif mergeMode == MergeMode.AVERAGE then
-            local sumR, sumG, sumB, sumA = 0, 0, 0, 0
             local sums = {0, 0, 0, 0}
             local sumCount = 0
             for _, index in pairs(indices) do
@@ -409,7 +464,6 @@ function init(plugin)
             for _, index in pairs(indices) do
                 selectedIndexCounts[index] = indexCounts[index]
             end
-            local sumR, sumG, sumB, sumA = 0, 0, 0, 0
             local sums = {0, 0, 0, 0}
             local sumCount = 0
             for index, count in pairs(selectedIndexCounts) do
@@ -483,77 +537,117 @@ function init(plugin)
         return indices
     end
 
-    local function buildDialog()
-        local dlg = Dialog("Palette Utils")
+    local function getIndicesSimilar(palette, indices, distanceMetric, colourSpace, distanceThreshold)
+        local indicesSet = {}
+        for i = 1, #indices do
+            local index = indices[i]
+            indicesSet[index] = true
+        end
+        local testIndicesSet = {}
+        for i = 0, #palette - 1 do
+            if indicesSet[i] ~= true then
+                testIndicesSet[i] = true
+            end
+        end
+        local similarIndices = {}
+        for testIndex, _ in pairs(testIndicesSet) do
+            local nearestIndex = nil
+            local nearestDistance = nil
+            for index, _ in pairs(indicesSet) do
+                local distance = colourDistance(distanceMetric, colourSpace, palette:getColor(index), palette:getColor(testIndex), false)
+                if distance < distanceThreshold then
+                    if nearestIndex == nil or distance < nearestDistance then
+                        nearestIndex = index
+                        nearestDistance = distance
+                    end
+                end
+            end
+            if nearestIndex ~= nil then
+                if similarIndices[nearestIndex] == nil then
+                    similarIndices[nearestIndex] = {}
+                end
+                table.insert(similarIndices[nearestIndex], testIndex)
+            end
+        end
+        return similarIndices
+    end
 
-        dlg:separator{text = "Select Indices"}
+    local function buildDialog()
+        local prefs = {distanceMetric = "option", colourSpace = "option", similarityThreshold = "text", usageThreshold = "text", leastUsedCount = "text", replacementColour = "color", mergeMode = "option", interpolationMethod = "option", rampSize = "text"}
+        local dlg
+        dlg = Dialog{title = "Palette Utils", onclose = function()
+            for pref, _ in pairs(prefs) do
+                plugin.preferences[pref] = dlg.data[pref]
+            end
+        end}
+
+        dlg:separator{text = "Preferences"}
         dlg:combobox{id = "distanceMetric", label = "Distance Metric", options = distanceMetricLabels, option = distanceMetricLabels[DistanceMetric.EUCLIDEAN]}
         dlg:combobox{id = "colourSpace", label = "Colour Space", options = colourSpaceLabels, option = colourSpaceLabels[ColourSpace.RGB]}
-        dlg:number{id = "selectSimilarityThreshold", label = "Similarity Threshold", text = tostring(0)}
-        dlg:button{text = "Select Similar", onclick = function()
+        dlg:number{id = "similarityThreshold", label = "Similarity Threshold", text = tostring(64)}
+        dlg:number{id = "usageThreshold", label = "Usage Threshold", text = tostring(64)}
+        dlg:number{id = "leastUsedCount", label = "Least Used Count", text = tostring(4), decimals = 0}
+        dlg:color{id = "replacementColour", label = "Replacement Colour", color = 0}
+        dlg:combobox{id = "mergeMode", label = "Merge Mode", options = mergeModeLabels, option = mergeModeLabels[MergeMode.MOST_USED]}
+        dlg:combobox{id = "interpolationMethod", label = "Interpolation Method", options = interpolationMethodLabels, option = interpolationMethodLabels[InterpolationMethod.LINEAR]}
+        dlg:number{id = "rampSize", label = "Ramp Size", text = tostring(8)}
+        for pref, value in pairs(prefs) do
+            if plugin.preferences[pref] ~= nil then
+                dlg:modify{id = pref, [value] = plugin.preferences[pref]}
+            end
+        end
+        
+        dlg:separator{text = "Select Indices"}
+        dlg:button{text = "Similar", onclick = function()
             app.transaction(function()
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
-                local targetIndices = app.range.colors
                 local palette = app.activeSprite.palettes[1]
-                if #targetIndices == 0 then
-                    local colour = app.fgColor 
-                    local index = colour.index
-                    if index == nil then
-                        index = findNearestColourIndex(distanceMetric, colourSpace, palette, colour)
-                    end
-                    table.insert(targetIndices, app.fgColor.index)
-                end
-                local targetIndicesSet = {}
-                for _, index in pairs(targetIndices) do
-                    targetIndicesSet[index] = true
-                end
-                local candidateIndices = {}
-                for i = 0, #palette - 1 do
-                    if targetIndicesSet[i] ~= true then
-                        table.insert(candidateIndices, i)
+                local similarIndices = getIndicesSimilar(palette, app.range.colors, distanceMetric, colourSpace, dlg.data["similarityThreshold"])
+                local indices = {}
+                for _, similar in pairs(similarIndices) do
+                    for _, index in pairs(similar) do
+                        table.insert(indices, index)
                     end
                 end
-                local similarIndicesSet = {}
-                local thresholdSquared = dlg.data["selectSimilarityThreshold"] ^ 2
-                for _, target in pairs(targetIndices) do
-                    for _, candidate in pairs(candidateIndices) do
-                        if similarIndicesSet[candidate] == nil then
-                            local distanceSquared = colourDistanceEuclideanSquared(palette:getColor(candidate), palette:getColor(target))
-                            if distanceSquared < thresholdSquared then
-                                similarIndicesSet[candidate] = true
-                            end
-                        end
-                    end
-                end
-                local similarIndices = {}
-                for similar, _ in pairs(similarIndicesSet) do
-                    table.insert(similarIndices, similar)
-                end
-                app.range.colors = similarIndices
+                app.range.colors = indices
+            end)
+            app.refresh()
+        end}
+        dlg:button{text = "Duplicates", onclick = function()
+            app.transaction(function()
+                app.range.colors = getIndicesDuplicated(app.activeSprite.palettes[1])
             end)
             app.refresh()
         end}
         dlg:newrow()
-        dlg:number{id = "usageThreshold", label = "Usage Threshold", text = tostring(0)}
-        dlg:button{text = "Select Below Usage Threshold", onclick = function()
+        dlg:button{text = "Below Usage Threshold", onclick = function()
             app.transaction(function()
                 app.range.colors = getIndicesInUsageRange(app.activeSprite.colorMode, app.activeSprite.palettes[1], app.range.cels, app.activeSprite.selection, 0, dlg.data["usageThreshold"])
             end)
             app.refresh()
         end}
-        dlg:newrow()
-        dlg:number{id = "nLeastUsed", label = "N Least Used", text = tostring(0), decimals = 0}
-        dlg:button{text = "Select N Least Used", onclick = function()
+        dlg:button{text = "Least Used", onclick = function()
             app.transaction(function()
-                app.range.colors = getIndicesNLeastUsed(app.activeSprite.colorMode, app.activeSprite.palettes[1], app.range.cels, app.activeSprite.selection, dlg.data["nLeastUsed"])
+                app.range.colors = getIndicesNLeastUsed(app.activeSprite.colorMode, app.activeSprite.palettes[1], app.range.cels, app.activeSprite.selection, dlg.data["leastUsedCount"])
             end)
             app.refresh()
         end}
         dlg:newrow()
-        dlg:button{text = "Select Duplicates", onclick = function()
+        dlg:button{text = "Invert Selection", onclick = function()
             app.transaction(function()
-                app.range.colors = getIndicesDuplicated(app.activeSprite.palettes[1])
+                local selectedSet = {}
+                for _, index in pairs(app.range.colors) do
+                    selectedSet[index] = true
+                end
+                local indices = {}
+                local palette = app.activeSprite.palettes[1]
+                for i = 0, #palette - 1 do
+                    if selectedSet[i] ~= true then
+                        table.insert(indices, i)
+                    end
+                end
+                app.range.colors = indices
             end)
             app.refresh()
         end}
@@ -597,27 +691,9 @@ function init(plugin)
         --         app.refresh()
         --     end)
         -- end}
-        dlg:newrow()
-        dlg:button{text = "Invert Selection", onclick = function()
-            app.transaction(function()
-                local selectedSet = {}
-                for _, index in pairs(app.range.colors) do
-                    selectedSet[index] = true
-                end
-                local indices = {}
-                local palette = app.activeSprite.palettes[1]
-                for i = 0, #palette - 1 do
-                    if selectedSet[i] ~= true then
-                        table.insert(indices, i)
-                    end
-                end
-                app.range.colors = indices
-            end)
-            app.refresh()
-        end}
 
         dlg:separator{text = "Remove Indices"}
-        dlg:button{text = "Replace Pixels With Nearest", onclick = function()
+        dlg:button{text = "Replace With Nearest", onclick = function()
             app.transaction(function()
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
@@ -625,9 +701,7 @@ function init(plugin)
             end)
             app.refresh()
         end}
-        dlg:newrow()
-        dlg:color{id = "replacementColour", label = "Replacement Colour", color = 0}
-        dlg:button{text = "Replace Pixels With Colour", onclick = function()
+        dlg:button{text = "Replace With Colour", onclick = function()
             app.transaction(function()
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
@@ -637,7 +711,12 @@ function init(plugin)
             app.refresh()
         end}
         dlg:newrow()
-        dlg:button{text = "Remove Duplicates", onclick = function()
+        dlg:button{text = "Unused", onclick = function()
+            app.transaction(function()
+            end)
+            app.refresh()
+        end}
+        dlg:button{text = "Duplicates", onclick = function()
             app.transaction(function()
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
@@ -648,8 +727,7 @@ function init(plugin)
         end}
 
         dlg:separator{text = "Merge Indices"}
-        dlg:combobox{id = "mergeMode", label = "Merge Mode", options = mergeModeLabels, option = mergeModeLabels[MergeMode.MOST_USED]}
-        dlg:button{text = "Merge Selected", onclick = function()
+        dlg:button{text = "Selected", onclick = function()
             app.transaction(function()
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
@@ -658,65 +736,76 @@ function init(plugin)
             end)
             app.refresh()
         end}
-        -- dlg:button{text = "Merge to Most Used", onclick = function()
-        --     app.transaction(function()
-        --         mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.MOST_USED)
-        --     end)
-        --     app.refresh()
-        -- end}
-        -- dlg:newrow()
-        -- dlg:button{text = "Merge to Average", onclick = function()
-        --     app.transaction(function()
-        --         mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.AVERAGE)
-        --     end)
-        --     app.refresh()
-        -- end}
-        -- dlg:newrow()
-        -- dlg:button{text = "Merge to Weighted Average", onclick = function()
-        --     app.transaction(function()
-        --         mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, MergeMode.WEIGHTED_AVERAGE)
-        --     end)
-        --     app.refresh()
-        -- end}
-        dlg:newrow()
-        dlg:number{id = "mergeSimilarityThreshold", label = "Similarity Threshold", text = tostring(0)}
-        dlg:button{text = "Merge Similar", onclick = function()
+        dlg:button{text = "Similar", onclick = function()
+            local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+            local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+            local mergeMode = mergeModeLabelsInverted[dlg.data["mergeMode"]]
+            local palette = app.activeSprite.palettes[1]
+            local similarIndices = getIndicesSimilar(palette, app.range.colors, distanceMetric, colourSpace, dlg.data["similarityThreshold"])
+            for index, mergeIndices in pairs(similarIndices) do
+                print(index, #mergeIndices) 
+            end
+            -- TODO -----------------
         end}
 
-        -- dlg:separator{text = "Reduce Indices"}
-        -- local ReductionMode = {
-        --     NEAREST = 0,
-        --     AVERAGE = 1,
-        --     WEIGHTED_AVERAGE = 2,
-        -- }
-        -- local reductionModeLabels = {
-        --     [ReductionMode.NEAREST] = "Replace With Nearest",
-        --     [ReductionMode.AVERAGE] = "Replace With Average",
-        --     [ReductionMode.WEIGHTED_AVERAGE] = "Replace With Weighted Average",
-        -- }
-        -- dlg:combobox{id = "reductionMode", label = "Reduction Mode", options = reductionModeLabels, option = reductionModeLabels[ReductionMode.NEAREST]}
-        -- dlg:number{id = "reductionSize", label = "Reduce to Size", text = tostring(16)}
-        -- dlg:button{text = "Reduce", onclick = function()
-        --     app.transaction(function()
-        --         local palette = app.activeSprite.palettes[1]
-        --         local reduceCount = #palette + 1 - dlg.data["reductionSize"]
-        --         local indices = {}
-        --         -- select reduceCount least used indices
-        --         local reductionModeLabelsInverted = tableInverse(reductionModeLabels)
-        --         local reductionMode = reductionModeLabelsInverted[dlg.data["reductionMode"]]
-        --         if reductionMode == ReductionMode.NEAREST then
-
-        --         elseif reductionMode == ReductionMode.AVERAGE then
-
-        --         elseif reductionMode == ReductionMode.WEIGHTED_AVERAGE then
-
-        --         end
-        --     end)
-        --     app.refresh()
-        -- end}
+        dlg:separator{text = "Ramps"}
+        dlg:newrow()
+        dlg:button{text = "Interpolate", onclick = function()
+            app.transaction(function()
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                local interpolationMethod = interpolationMethodLabelsInverted[dlg.data["interpolationMethod"]]
+                local palette = Palette(app.activeSprite.palettes[1])
+                local indices = app.range.colors
+                rampIndices(colourSpace, interpolationMethod, palette, indices)
+                app.activeSprite:setPalette(palette)
+            end)
+            app.refresh()
+        end}
+        dlg:button{text = "Spline", onclick = function()
+            app.transaction(function()
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                local interpolationMethod = interpolationMethodLabelsInverted[dlg.data["interpolationMethod"]]
+                local palette = Palette(app.activeSprite.palettes[1])
+                for i = 1, #app.range.colors - 1 do
+                    local indices = {}
+                    for j = app.range.colors[i], app.range.colors[i + 1] do
+                        table.insert(indices, j)
+                    end
+                    rampIndices(colourSpace, interpolationMethod, palette, indices)
+                end
+                app.activeSprite:setPalette(palette)
+            end)
+            app.refresh()
+        end}
+        dlg:newrow()
+        dlg:button{text = "Resize", onclick = function()
+            app.transaction(function()
+                local interpolationMethod = interpolationMethodLabelsInverted[dlg.data["interpolationMethod"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                local palette = app.activeSprite.palettes[1]
+                local fromIndices = app.range.colors
+                local fromSize = #fromIndices
+                local colour0 = palette:getColor(fromIndices[1])
+                local colour1 = palette:getColor(fromIndices[fromSize])
+                local fromStep = 1.0 / (fromSize - 1)
+                local toSize = dlg.data["rampSize"]
+                local toStep = 1.0 / (toSize - 1)
+                local pos = 0.0
+                for i = 0, toSize - 1 do
+                    local colour = interpolateColour(interpolationMethod, colourSpace, colour0, colour1, pos)
+                    pos = pos + toStep
+                end
+            end)
+            app.refresh()
+        end}
+        dlg:button{text = "Reverse", onclick = function()
+            app.transaction(function()
+            end)
+            app.refresh()
+        end}
 
         dlg:separator{text = "Add Indices"}
-        dlg:button{text = "All Colours From Selection", onclick = function()
+        dlg:button{text = "Unique Pixels", onclick = function()
             app.transaction(function()
                 local colourSequence, _ = coloursInSelection(app.range.cels, app.activeSprite.selection)
                 local palette = app.activeSprite.palettes[1]
@@ -729,8 +818,56 @@ function init(plugin)
             end)
             app.refresh()
         end}
+        dlg:button{text = "All Pixels", onclick = function()
+            app.transaction(function()
+                local colours = {}
+                perPixelInSelection(app.range.cels, app.activeSprite.selection, false, function(it)
+                    table.insert(colours, Color(it()))
+                end)
+                local palette = app.activeSprite.palettes[1]
+                local paletteSize = #palette
+                palette:resize(paletteSize + #colours)
+                for i = 1, #colours do
+                    palette:setColor(paletteSize - 1 + i, colours[i])
+                end
+            end)
+            app.refresh()
+        end}
         dlg:newrow()
-        dlg:button{text = "Weighted Average From Selection", onclick = function()
+        dlg:button{text = "Grid Centres", onclick = function()
+            app.transaction(function()
+                local palette = app.activeSprite.palettes[1]
+                local grid = app.activeSprite.gridBounds
+                local selection = app.activeSprite.selection
+                local hasSelection = selection ~= nil and not selection.isEmpty
+                for _, cel in ipairs(app.range.cels) do
+                    local bounds = celSelectionOffsetBounds(cel, selection)
+                    local gridX0 = math.floor((bounds.x - grid.x) / grid.width)
+                    local gridY0 = math.floor((bounds.y - grid.y) / grid.height)
+                    local gridX1 = math.ceil((bounds.x - grid.x + bounds.width) / grid.width) - 1
+                    local gridY1 = math.ceil((bounds.y - grid.y + bounds.height) / grid.height) - 1
+                    local image = cel.image
+                    local colours = {}
+                    local count = 0
+                    for y = gridY0, gridY1 do
+                        for x = gridX0, gridX1 do
+                            local pos = Point(math.floor((x + 0.5) * grid.width + grid.x), math.floor((y + 0.5) * grid.height + grid.y))
+                            if not hasSelection or selection:contains(pos.x + cel.position.x, pos.y + cel.position.y) then
+                                table.insert(colours, Color(image:getPixel(pos.x, pos.y)))
+                                count = count + 1
+                            end
+                        end
+                    end
+                    local paletteSize = #palette
+                    palette:resize(paletteSize + #colours)
+                    for i = 1, #colours do
+                        palette:setColor(paletteSize - 1 + i, colours[i])
+                    end
+                end
+            end)
+            app.refresh()
+        end}
+        dlg:button{text = "Weighted Average", onclick = function()
             app.transaction(function()
                 local _, colourCount = coloursInSelection(app.range.cels, app.activeSprite.selection)
                 local sumR, sumG, sumB, sumA = 0, 0, 0, 0
@@ -753,65 +890,14 @@ function init(plugin)
             end)
             app.refresh()
         end}
-        dlg:newrow()
-        dlg:button{text = "All Colours From Selected Grid Centres", onclick = function()
-            app.transaction(function()
-                for _, cel in ipairs(app.range.cels) do
-                    local selection = app.activeSprite.selection
-                    local bounds = celSelectionOffsetBounds(cel, selection)
-                    local grid = app.activeSprite.gridBounds
-                    local gridX0 = math.floor((bounds.x - grid.x) / grid.width)
-                    local gridY0 = math.floor((bounds.y - grid.y) / grid.height)
-                    local gridX1 = math.ceil((bounds.x - grid.x + bounds.width) / grid.width) - 1
-                    local gridY1 = math.ceil((bounds.y - grid.y + bounds.height) / grid.height) - 1
-                    local image = cel.image
-                    local colours = {}
-                    local count = 0
-                    for y = gridY0, gridY1 do
-                        for x = gridX0, gridX1 do
-                            local pos = Point(math.floor((x + 0.5) * grid.width + grid.x), math.floor((y + 0.5) * grid.height + grid.y))
-                            table.insert(colours, Color(image:getPixel(pos.x, pos.y)))
-                            count = count + 1
-                        end
-                    end
-                    local palette = app.activeSprite.palettes[1]
-                    local paletteSize = #palette
-                    palette:resize(paletteSize + #colours)
-                    for i = 1, #colours do
-                        palette:setColor(paletteSize - 1 + i, colours[i])
-                    end
-                end
-            end)
-            app.refresh()
-        end}
-        dlg:newrow()
-        dlg:button{text = "All Pixels From Selection", onclick = function()
-            app.transaction(function()
-                local colours = {}
-                perPixelInSelection(app.range.cels, app.activeSprite.selection, false, function(it)
-                    table.insert(colours, Color(it()))
-                end)
-                local palette = app.activeSprite.palettes[1]
-                local paletteSize = #palette
-                palette:resize(paletteSize + #colours)
-                for i = 1, #colours do
-                    palette:setColor(paletteSize - 1 + i, colours[i])
-                end
-            end)
-            app.refresh()
-        end}
 
         dlg:separator{text = "Misc."}
-        dlg:label{id = "colourCount", label = "Colour Count", text="-"}
-        dlg:button{text = "Count Colours Used", onclick = function()
+        local colourCountText = "Count Colours Used"
+        dlg:button{id = "colourCount", text = colourCountText, onclick = function()
             local colourSequence, _ = coloursInSelection(app.range.cels, app.activeSprite.selection)
-            dlg:modify{id = "colourCount", text=tostring(#colourSequence)}
+            dlg:modify{id = "colourCount", text = colourCountText .. ": " .. tostring(#colourSequence)}
         end}
-        dlg:newrow()
-        dlg:number{id = "histogramWidth", label = "Histogram Size", text = tostring(256)}
-        dlg:number{id = "histogramHeight", text = tostring(256)}
-        dlg:check{id = "histogramExcludeTransparent", text = "Histogram Exclude Transparent", value = false}
-        dlg:button{text = "Show Histogram", onclick = function()
+        dlg:button{text = "Histogram", onclick = function()
             app.transaction(function()
                 local palette = app.activeSprite.palettes[1]
                 local maxCount = 0
@@ -821,8 +907,8 @@ function init(plugin)
                         maxCount = count
                     end
                 end
-                local width = dlg.data["histogramWidth"]
-                local height = dlg.data["histogramHeight"]
+                local width = #palette
+                local height = width
                 local xScale = width / #palette
                 local yScale = height / maxCount
                 local sprite = Sprite(width, height, ColorMode.INDEXED)
@@ -857,9 +943,6 @@ function init(plugin)
         title = "Palette Utils...",
         group = "palette_main",
         onclick = function()
-            if plugin.preferences.loadOnOpen then
-                loadUserData()
-            end
             buildDialog()
         end
     }
