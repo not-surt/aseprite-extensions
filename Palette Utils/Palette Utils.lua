@@ -75,7 +75,7 @@ function init(plugin)
     local colourSpacePolarComponents = {
         [ColourSpace.HSL] = {[1] = true},
         [ColourSpace.HSV] = {[1] = true},
-        -- [ColourSpace.LCH] = {[3] = true},
+        [ColourSpace.LCH] = {[3] = true},
     }
     local colourSpaceLabels = {
         [ColourSpace.RGB] = "RGB",
@@ -105,14 +105,14 @@ function init(plugin)
         end
     end
     local distanceElementFunc = {
-        [DistanceMetric.EUCLIDEAN] = function(sum, a, b)
-            return sum + (b - a) ^ 2
+        [DistanceMetric.EUCLIDEAN] = function(sum, difference)
+            return sum + (difference) ^ 2
         end,
-        [DistanceMetric.MANHATTAN] = function(sum, a, b)
-            return sum + math.abs(b - a)
+        [DistanceMetric.MANHATTAN] = function(sum, difference)
+            return sum + math.abs(difference)
         end,
-        [DistanceMetric.CHEBYSHEV] = function(sum, a, b)
-            return math.max(sum, math.abs(b - a))
+        [DistanceMetric.CHEBYSHEV] = function(sum, difference)
+            return math.max(sum, math.abs(difference))
         end,
     }
     local distanceSumFunc = {
@@ -122,22 +122,28 @@ function init(plugin)
             end
         end
     }
-    local function distance(metric, a, b, relative)
+    local function distance(metric, colourSpace, a, b, componentScales, relative)
+        local polarComponents = colourSpacePolarComponents[colourSpace]
         local sum = 0
         local elementCount = math.min(#a, #b)
         for i = 1, elementCount do
-            sum = distanceElementFunc[metric](sum, a[i], b[i])
+            if componentScales[i] ~= 0 then
+                local difference = b[i] - a[i]
+                if polarComponents ~= nil and polarComponents[i] == true and math.abs(difference) > 0.5 then
+                    difference = 1.0 - math.abs(difference)
+                end
+                sum = distanceElementFunc[metric](sum, difference * componentScales[i])
+            end
         end
         if distanceSumFunc[metric] ~= nil then
             sum = distanceSumFunc[metric](sum, relative)
         end
         return sum
     end
-    local function colourDistance(metric, colourSpace, a, b, relative)
-        -- TODO hande polar cordinates
+    local function colourDistance(metric, colourSpace, a, b, componentScales, relative)
         local convertedA = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(a))
         local convertedB = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(b))
-        return distance(metric, convertedA, convertedB, relative) * 256
+        return distance(metric, colourSpace, convertedA, convertedB, componentScales, relative)
     end
 
     local function lerp(a, b, pos)
@@ -211,7 +217,15 @@ function init(plugin)
         local convertedInterpolated = colourConvert(colourSpace, ColourSpace.RGB, interpolated)
         return floatVectorToColour(convertedInterpolated)
     end
-    local function rampIndices(colourSpace, interpolationMethod, palette, indices)
+    local function rampInterpolateColour(interpolationMethod, colourSpace, palette, indices, pos)
+        local step = 1.0 / (#indices - 1)
+        local index = math.floor(pos / step)
+        local segmentPos = (pos - index * step) / step
+        local colourA = palette:getColor(indices[index + 1])
+        local colourB = palette:getColor(indices[index + 2])
+        return interpolateColour(interpolationMethod, colourSpace, colourA, colourB, segmentPos)
+    end
+    local function rampIndices(interpolationMethod, colourSpace, palette, indices)
         local colour0 = palette:getColor(indices[1])
         local colour1 = palette:getColor(indices[#indices])
         local step = 1.0 / (#indices - 1)
@@ -318,11 +332,11 @@ function init(plugin)
         return indexCounts
     end
 
-    local function findNearestColourIndex(metric, colourSpace, palette, colour)
+    local function findNearestColourIndex(metric, colourSpace, palette, colour, componentScales)
         local nearestIndex = nil
         local nearestDistance = nil
         for i = 0, #palette - 1 do
-            local distance = colourDistance(metric, colourSpace, colour, palette:getColor(i), false)
+            local distance = colourDistance(metric, colourSpace, colour, palette:getColor(i), componentScales, false)
             if nearestIndex == nil or distance < nearestDistance then
                 nearestIndex = i
                 nearestDistance = distance
@@ -346,50 +360,50 @@ function init(plugin)
     end
 
     local function paletteRemoveInsertMapping(palette, removeIndices, insertColours)
-        local removeIndicesSize = 0
-        local insertColoursSize = 0
-        if removeIndices ~= nil then
-            removeIndicesSize = #removeIndices
+        if removeIndices then
             table.sort(removeIndices)
         end
-        if insertColours ~= nil then
-            insertColoursSize = #insertColours
+        if insertColours then
             table.sort(insertColours, function(a, b)
                 return a.index < b.index
             end)
         end
-        local newPalette = Palette(#palette - removeIndicesSize + insertColoursSize)
+        local newPaletteColours = {}
         local mapping = {}
-        local remapOffset = 0
-        local removeTableIndex = 1
-        local insertTableIndex = 1
+        local removeIndicesIndex = 1
+        local insertColoursIndex = 1
+        local function insertColoursUntilIndex(index)
+            while insertColours do
+                local nextInsertIndex = insertColours[insertColoursIndex] and insertColours[insertColoursIndex].index
+                if nextInsertIndex and (not index or nextInsertIndex <= index) then
+                    for _, colour in ipairs(insertColours[insertColoursIndex].colours) do
+                        table.insert(newPaletteColours, colour)
+                    end
+                    insertColoursIndex = insertColoursIndex + 1
+                else
+                    break
+                end
+            end
+        end
         for i = 0, #palette - 1 do
-            local removeIndex = nil
-            if removeIndices ~= nil then
-                removeIndex = removeIndices[removeTableIndex]
-            end
-            local insertIndex = nil
-            if insertColours ~= nil and insertColours[insertTableIndex] ~= nil then
-                insertIndex = insertColours[insertTableIndex].index
-            end
-            if i ~= removeIndex and i ~= insertIndex then
-                local remapIndex = i + remapOffset
-                newPalette:setColor(remapIndex, palette:getColor(i))
-                mapping[i] = remapIndex
+            -- Insert colours
+            insertColoursUntilIndex(i)
+            -- Remove colour
+            local nextRemoveIndex = removeIndices and removeIndices[removeIndicesIndex]
+            if i == nextRemoveIndex then
+                mapping[i] = nil
+                removeIndicesIndex = removeIndicesIndex + 1
+            -- Colour not removed so transfer to new palette
             else
-                if i == removeIndex then
-                    mapping[i] = nil
-                    remapOffset = remapOffset - 1
-                    removeTableIndex = removeTableIndex + 1
-                end
-                if i == insertIndex then
-                    local remapIndex = i + remapOffset
-                    newPalette:setColor(remapIndex, insertColours[insertTableIndex].colour)
-                    mapping[i] = remapIndex
-                    remapOffset = remapOffset + 1
-                    insertTableIndex = insertTableIndex + 1
-                end
+                mapping[i] = #newPaletteColours
+                table.insert(newPaletteColours, palette:getColor(i))
             end
+        end
+        -- Insert any remaining colours
+        insertColoursUntilIndex()
+        local newPalette = Palette(#newPaletteColours)
+        for i, colour in ipairs(newPaletteColours) do
+            newPalette:setColor(i - 1, colour)
         end
         return newPalette, mapping
     end
@@ -402,13 +416,13 @@ function init(plugin)
         [RemoveMode.REPLACE_WITH_NEAREST] = "Replace With Nearest",
         [RemoveMode.REPLACE_WITH_INDEX] = "Replace With Index",
     }
-    local function removeIndices(sprite, cels, selection, indices, removeMode, distanceMetric, colourSpace, replacementIndex)
+    local function removeIndices(sprite, cels, selection, indices, removeMode, distanceMetric, colourSpace, componentScales, replacementIndex)
         local colourMode = sprite.colorMode
         local palette = sprite.palettes[1]
         local unmappedIndexFunc = nil
         if removeMode == RemoveMode.REPLACE_WITH_NEAREST then
             unmappedIndexFunc = function(colourMode, palette, indexMapping, newPalette, index)
-                return findNearestColourIndex(distanceMetric, colourSpace, newPalette, palette:getColor(index))
+                return findNearestColourIndex(distanceMetric, colourSpace, newPalette, palette:getColor(index), componentScales)
             end
         elseif removeMode == RemoveMode.REPLACE_WITH_INDEX then
             unmappedIndexFunc = function(colourMode, palette, indexMapping, newPalette, index)
@@ -554,7 +568,7 @@ function init(plugin)
         return indices
     end
 
-    local function getIndicesSimilar(palette, indices, distanceMetric, colourSpace, distanceThreshold)
+    local function getIndicesSimilar(palette, indices, distanceMetric, colourSpace, distanceThreshold, componentScales)
         local indicesSet = {}
         for i = 1, #indices do
             local index = indices[i]
@@ -571,7 +585,7 @@ function init(plugin)
             local nearestIndex = nil
             local nearestDistance = nil
             for index, _ in pairs(indicesSet) do
-                local distance = colourDistance(distanceMetric, colourSpace, palette:getColor(index), palette:getColor(testIndex), false)
+                local distance = colourDistance(distanceMetric, colourSpace, palette:getColor(index), palette:getColor(testIndex), componentScales, false)
                 if distance < distanceThreshold then
                     if nearestIndex == nil or distance < nearestDistance then
                         nearestIndex = index
@@ -589,8 +603,23 @@ function init(plugin)
         return similarIndices
     end
 
+    local function getSelectedIndices(noneToAll)
+        local indices = app.range.colors
+        if #indices == 0 then
+            if noneToAll then
+                local palette = app.activeSprite.palettes[1]
+                for i = 0, #palette - 1 do
+                    table.insert(indices, i)
+                end
+            else
+                indices = {app.fgColor.index}
+            end
+        end
+        return indices
+    end
+
     local function buildDialog()
-        local prefs = {distanceMetric = "option", colourSpace = "option", similarityThreshold = "text", usageThreshold = "text", leastUsedCount = "text", replacementColour = "color", mergeMode = "option", interpolationMethod = "option", rampSize = "text"}
+        local prefs = {distanceMetric = "option", colourSpace = "option", similarityThreshold = "text", componentScale0 = "text", componentScale1 = "text", componentScale2 = "text", componentScale3 = "text", usageThreshold = "text", leastUsedCount = "text", replacementColour = "color", mergeMode = "option", interpolationMethod = "option", rampSize = "text"}
         local dlg
         dlg = Dialog{title = "Palette Utils", onclose = function()
             for pref, _ in pairs(prefs) do
@@ -602,6 +631,10 @@ function init(plugin)
         dlg:combobox{id = "distanceMetric", label = "Distance Metric", options = distanceMetricLabels, option = distanceMetricLabels[DistanceMetric.EUCLIDEAN]}
         dlg:combobox{id = "colourSpace", label = "Colour Space", options = colourSpaceLabels, option = colourSpaceLabels[ColourSpace.RGB]}
         dlg:number{id = "similarityThreshold", label = "Similarity Threshold", text = tostring(64)}
+        dlg:number{id = "componentScale0", label = "Component Scale", text = tostring(256)}
+        dlg:number{id = "componentScale1", text = tostring(256)}
+        dlg:number{id = "componentScale2", text = tostring(256)}
+        dlg:number{id = "componentScale3", text = tostring(256)}
         dlg:number{id = "usageThreshold", label = "Usage Threshold", text = tostring(64)}
         dlg:number{id = "leastUsedCount", label = "Least Used Count", text = tostring(4), decimals = 0}
         dlg:color{id = "replacementColour", label = "Replacement Colour", color = 0}
@@ -620,7 +653,8 @@ function init(plugin)
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local palette = app.activeSprite.palettes[1]
-                local similarIndices = getIndicesSimilar(palette, app.range.colors, distanceMetric, colourSpace, dlg.data["similarityThreshold"])
+                local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
+                local similarIndices = getIndicesSimilar(palette, getSelectedIndices(), distanceMetric, colourSpace, dlg.data["similarityThreshold"], componentScales)
                 local indices = {}
                 for _, similar in pairs(similarIndices) do
                     for _, index in pairs(similar) do
@@ -654,7 +688,7 @@ function init(plugin)
         dlg:button{text = "Invert Selection", onclick = function()
             app.transaction(function()
                 local selectedSet = {}
-                for _, index in pairs(app.range.colors) do
+                for _, index in pairs(getSelectedIndices()) do
                     selectedSet[index] = true
                 end
                 local indices = {}
@@ -668,10 +702,10 @@ function init(plugin)
             end)
             app.refresh()
         end}
-        dlg:button{text = "Select Pixels", enabled = false, onclick = function()
+        dlg:button{text = "Select Pixels", onclick = function()
             app.transaction(function()
                 local coloursSet = {}
-                for i, index in pairs(app.range.colors) do
+                for i, index in pairs(getSelectedIndices()) do
                     coloursSet[index] = true
                 end
                 local selection = Selection()
@@ -685,9 +719,8 @@ function init(plugin)
                         if run ~= nil then
                             -- finish run
                             local runWidth = run.finish.x - run.start.x + 1
-                            print(run.start.x, run.start.y, runWidth)
                             local rect = Rectangle(run.start.x, run.start.y, runWidth, 1)
-                            selection:select(rect)
+                            selection:add(rect)
                             run = nil
                         end
                     else
@@ -702,7 +735,6 @@ function init(plugin)
                         end
                     end
                 end)
-                print(tostring(selection.bounds))
                 app.activeSprite.selection = selection
                 app.refresh()
             end)
@@ -713,7 +745,8 @@ function init(plugin)
             app.transaction(function()
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
-                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, RemoveMode.REPLACE_WITH_NEAREST, distanceMetric, colourSpace)
+                local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, getSelectedIndices(), RemoveMode.REPLACE_WITH_NEAREST, distanceMetric, colourSpace, componentScales)
             end)
             app.refresh()
         end}
@@ -722,13 +755,20 @@ function init(plugin)
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local replacementIndex = dlg.data["replacementColour"].index
-                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, RemoveMode.REPLACE_WITH_INDEX, distanceMetric, colourSpace, replacementIndex)
+                local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, getSelectedIndices(), RemoveMode.REPLACE_WITH_INDEX, distanceMetric, colourSpace, componentScales, replacementIndex)
             end)
             app.refresh()
         end}
         dlg:newrow()
         dlg:button{text = "Unused", onclick = function()
             app.transaction(function()
+                local indices = getIndicesInUsageRange(app.activeSprite.colorMode, app.activeSprite.palettes[1], app.range.cels, app.activeSprite.selection, 0, 1)
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                local replacementIndex = dlg.data["replacementColour"].index
+                local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, indices, RemoveMode.REPLACE_WITH_INDEX, distanceMetric, colourSpace, componentScales, replacementIndex)
             end)
             app.refresh()
         end}
@@ -737,7 +777,8 @@ function init(plugin)
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local indices = getIndicesDuplicated(app.activeSprite.palettes[1])
-                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, indices, RemoveMode.REPLACE_WITH_NEAREST, distanceMetric, colourSpace)
+                local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
+                removeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, indices, RemoveMode.REPLACE_WITH_NEAREST, distanceMetric, colourSpace, componentScales)
             end)
             app.refresh()
         end}
@@ -748,7 +789,7 @@ function init(plugin)
                 local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local mergeMode = mergeModeLabelsInverted[dlg.data["mergeMode"]]
-                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, app.range.colors, mergeMode, distanceMetric, colourSpace)
+                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, getSelectedIndices(), mergeMode, distanceMetric, colourSpace)
             end)
             app.refresh()
         end}
@@ -757,7 +798,7 @@ function init(plugin)
             local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
             local mergeMode = mergeModeLabelsInverted[dlg.data["mergeMode"]]
             local palette = app.activeSprite.palettes[1]
-            local similarIndices = getIndicesSimilar(palette, app.range.colors, distanceMetric, colourSpace, dlg.data["similarityThreshold"])
+            local similarIndices = getIndicesSimilar(palette, getSelectedIndices(), distanceMetric, colourSpace, dlg.data["similarityThreshold"])
             for index, mergeIndices in pairs(similarIndices) do
                 print(index, #mergeIndices) 
             end
@@ -771,8 +812,8 @@ function init(plugin)
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local interpolationMethod = interpolationMethodLabelsInverted[dlg.data["interpolationMethod"]]
                 local palette = Palette(app.activeSprite.palettes[1])
-                local indices = app.range.colors
-                rampIndices(colourSpace, interpolationMethod, palette, indices)
+                local indices = getSelectedIndices()
+                rampIndices(interpolationMethod, colourSpace, palette, indices)
                 app.activeSprite:setPalette(palette)
             end)
             app.refresh()
@@ -787,7 +828,7 @@ function init(plugin)
                     for j = app.range.colors[i], app.range.colors[i + 1] do
                         table.insert(indices, j)
                     end
-                    rampIndices(colourSpace, interpolationMethod, palette, indices)
+                    rampIndices(interpolationMethod, colourSpace, palette, indices)
                 end
                 app.activeSprite:setPalette(palette)
             end)
@@ -796,21 +837,31 @@ function init(plugin)
         dlg:newrow()
         dlg:button{text = "Resize", onclick = function()
             app.transaction(function()
+                local sprite = app.activeSprite
                 local interpolationMethod = interpolationMethodLabelsInverted[dlg.data["interpolationMethod"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local palette = app.activeSprite.palettes[1]
-                local fromIndices = app.range.colors
-                local fromSize = #fromIndices
-                local colour0 = palette:getColor(fromIndices[1])
-                local colour1 = palette:getColor(fromIndices[fromSize])
-                local fromStep = 1.0 / (fromSize - 1)
+                local fromIndices = getSelectedIndices()
                 local toSize = dlg.data["rampSize"]
                 local toStep = 1.0 / (toSize - 1)
                 local pos = 0.0
-                for i = 0, toSize - 1 do
-                    local colour = interpolateColour(interpolationMethod, colourSpace, colour0, colour1, pos)
+                local toColours = {}
+                for i = 1, toSize do
+                    table.insert(toColours, rampInterpolateColour(interpolationMethod, colourSpace, palette, fromIndices, pos))
                     pos = pos + toStep
                 end
+                local newPalette, indexMapping = paletteRemoveInsertMapping(palette, fromIndices, {{index = fromIndices[1], colours = toColours}})
+                -- local red = Color{red=255, green=0, blue=0, alpha=255}
+                -- local blue = Color{red=0, green=0, blue=255, alpha=255}
+                -- local newPalette, indexMapping = paletteRemoveInsertMapping(palette, {}, {{index=4, colour=red}, {index=5, colour=blue}, {index=6, colour=red}, {index=7, colour=blue}})
+                -- local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, function(colourMode, palette, indexMapping, newPalette, index)
+                --     return findNearestColourIndex(distanceMetric, colourSpace, newPalette, palette:getColor(index), componentScales)
+                -- end)
+                -- applyMappingInSelection(cels, selection, pixelValueMapping)
+                sprite:setPalette(newPalette)
+                -- for i, colour in ipairs(toColours) do
+                --     palette:setColor(fromIndices[1] + i - 1, colour)
+                -- end
             end)
             app.refresh()
         end}
@@ -864,13 +915,11 @@ function init(plugin)
                     local gridY1 = math.ceil((bounds.y - grid.y + bounds.height) / grid.height) - 1
                     local image = cel.image
                     local colours = {}
-                    local count = 0
                     for y = gridY0, gridY1 do
                         for x = gridX0, gridX1 do
                             local pos = Point(math.floor((x + 0.5) * grid.width + grid.x), math.floor((y + 0.5) * grid.height + grid.y))
                             if not hasSelection or selection:contains(pos.x + cel.position.x, pos.y + cel.position.y) then
                                 table.insert(colours, Color(image:getPixel(pos.x, pos.y)))
-                                count = count + 1
                             end
                         end
                     end
