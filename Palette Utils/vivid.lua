@@ -338,13 +338,13 @@ function vivid.LabtoLCH(...)
 
   C = math_sqrt(a ^ 2 + b ^ 2)
 
-  return L,C,(H / 360),alpha
+  return L,C,H,alpha
 end
 
 function vivid.LCHtoLab(...)
   local L,C,H,alpha = getColorArgs(...)
 
-  return L,math_cos(math_rad(H * 360))*C,math_sin(math_rad(H * 360))*C,alpha
+  return L,math_cos(math_rad(H))*C,math_sin(math_rad(H))*C,alpha
 end
 
 function vivid.XYZtoLuv(...)
@@ -440,11 +440,11 @@ function vivid.HSVSpread(count,hoffset,s,v,a)
   return colors
 end
 function vivid.LCHSpread(count,l,c,hoffset,a)
-  local incval = 1/count
+  local incval = 360/count
   local colors = {}
 
   for i=0,count-1 do
-    table.insert(colors,{vivid.LCHtoRGB(l,c,(i*incval+hoffset)%1,a)})
+    table.insert(colors,{vivid.LCHtoRGB(l,c,(i*incval+hoffset)%360,a)})
   end
 
   return colors
