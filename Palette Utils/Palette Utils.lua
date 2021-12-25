@@ -72,10 +72,10 @@ function init(plugin)
         LCH = 5,
         LUV = 6,
     }
-    local colourSpacePolarComponents = {
-        [ColourSpace.HSL] = {[1] = true},
-        [ColourSpace.HSV] = {[1] = true},
-        [ColourSpace.LCH] = {[3] = true},
+    local colourSpaceWrappingComponents = {
+        [ColourSpace.HSL] = {[1] = {0.0, 1.0}},
+        [ColourSpace.HSV] = {[1] = {0.0, 1.0}},
+        [ColourSpace.LCH] = {[3] = {0.0, 360.0}},
     }
     local colourSpaceLabels = {
         [ColourSpace.RGB] = "RGB",
@@ -106,13 +106,13 @@ function init(plugin)
     end
     local distanceElementFunc = {
         [DistanceMetric.EUCLIDEAN] = function(sum, difference)
-            return sum + (difference) ^ 2
+            return sum + difference ^ 2
         end,
         [DistanceMetric.MANHATTAN] = function(sum, difference)
-            return sum + math.abs(difference)
+            return sum + difference
         end,
         [DistanceMetric.CHEBYSHEV] = function(sum, difference)
-            return math.max(sum, math.abs(difference))
+            return math.max(sum, difference)
         end,
     }
     local distanceSumFunc = {
@@ -123,14 +123,15 @@ function init(plugin)
         end
     }
     local function distance(metric, colourSpace, a, b, componentScales, relative)
-        local polarComponents = colourSpacePolarComponents[colourSpace]
+        local wrappingComponents = colourSpaceWrappingComponents[colourSpace]
         local sum = 0
         local elementCount = math.min(#a, #b)
         for i = 1, elementCount do
             if componentScales[i] ~= 0 then
-                local difference = b[i] - a[i]
-                if polarComponents ~= nil and polarComponents[i] == true and math.abs(difference) > 0.5 then
-                    difference = 1.0 - math.abs(difference)
+                local difference = math.abs(b[i] - a[i])
+                local componentRange = wrappingComponents and wrappingComponents[i]
+                if componentRange then
+                    difference = math.min(difference, math.abs(componentRange[2] - componentRange[1]) - difference)
                 end
                 sum = distanceElementFunc[metric](sum, difference * componentScales[i])
             end
@@ -181,39 +182,37 @@ function init(plugin)
             return pos^3 * (pos * (pos * 6 - 15) + 10)
         end,
     }
-    local function interpolateValue(interpolationMethod, a, b, pos, polar)
+    local function interpolateValue(interpolationMethod, a, b, pos, componentRange)
         local posMethod = interpolateFunc[interpolationMethod](clamp(0, 1, pos))
-        if polar == true then
+        if componentRange ~= nil then
+            local rangeSize = math.abs(componentRange[2] - componentRange[1])
+            local halfRangeSize = rangeSize / 2.0
             local difference = math.abs(b - a)
             local offsetA = 0.0
             local offsetB = 0.0
-            if difference > 0.5 then
+            if difference > halfRangeSize then
                 if a < b then
-                    offsetB = -1.0
+                    offsetB = -rangeSize
                 else
-                    offsetA = -1.0
+                    offsetA = -rangeSize
                 end
             end
-            return wrap(0.0, 1.0, lerp(a + offsetA, b + offsetB, posMethod))
+            return wrap(componentRange[1], componentRange[2], lerp(a + offsetA, b + offsetB, posMethod))
         else
             return lerp(a, b, posMethod)
         end
     end
-    local function interpolateVector(interpolationMethod, a, b, pos, polarComponents)
+    local function interpolateVector(interpolationMethod, a, b, pos, wrappingComponents)
         local vector = {}
         for i = 1, #a do
-            local polar = false
-            if polarComponents ~= nil and polarComponents[i] == true then
-                polar = true
-            end
-            vector[i] = interpolateValue(interpolationMethod, a[i], b[i], pos, polar)
+            vector[i] = interpolateValue(interpolationMethod, a[i], b[i], pos, wrappingComponents and wrappingComponents[i])
         end
         return vector
     end
     local function interpolateColour(interpolationMethod, colourSpace, a, b, pos)
         local convertedA = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(a))
         local convertedB = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(b))
-        local interpolated = interpolateVector(interpolationMethod, convertedA, convertedB, pos, colourSpacePolarComponents[colourSpace])
+        local interpolated = interpolateVector(interpolationMethod, convertedA, convertedB, pos, colourSpaceWrappingComponents[colourSpace])
         local convertedInterpolated = colourConvert(colourSpace, ColourSpace.RGB, interpolated)
         return floatVectorToColour(convertedInterpolated)
     end
@@ -661,7 +660,11 @@ function init(plugin)
         dlg:number{id = "componentScale3", text = tostring(256)}
         dlg:number{id = "usageThreshold", label = "Usage Threshold", text = tostring(64)}
         dlg:number{id = "leastUsedCount", label = "Least Used Count", text = tostring(4), decimals = 0}
-        dlg:color{id = "replacementColour", label = "Replacement Colour", color = 0}
+        dlg:color{id = "replacementColour", label = "Replacement Colour", color = 0, onchange = function()
+            local colour = colourToFloatVector(dlg.data["replacementColour"])
+            local converted = colourConvert(ColourSpace.RGB, colourSpaceLabelsInverted[dlg.data["colourSpace"]], colour)
+            print(dlg.data["colourSpace"] .. ": (" .. converted[1] .. ", " .. converted[2] .. ", " .. converted[3] .. ", " .. converted[4] ..")")
+        end}
         dlg:combobox{id = "mergeMode", label = "Merge Mode", options = mergeModeLabels, option = mergeModeLabels[MergeMode.MOST_USED]}
         dlg:combobox{id = "interpolationMethod", label = "Interpolation Method", options = interpolationMethodLabels, option = interpolationMethodLabels[InterpolationMethod.LINEAR]}
         dlg:number{id = "rampSize", label = "Ramp Size", text = tostring(8)}
@@ -855,17 +858,33 @@ function init(plugin)
                 local palette = Palette(app.activeSprite.palettes[1])
                 local indices = getSelectedIndices(false)
                 for i = 1, #indices - 1 do
-                    local indices = {}
+                    local segmentIndices = {}
                     for j = indices[i], indices[i + 1] do
-                        table.insert(indices, j)
+                        table.insert(segmentIndices, j)
                     end
-                    rampIndices(interpolationMethod, colourSpace, palette, indices)
+                    rampIndices(interpolationMethod, colourSpace, palette, segmentIndices)
                 end
                 app.activeSprite:setPalette(palette)
             end)
             app.refresh()
         end}
         dlg:newrow()
+        -- dlg:button{text = "Combinations", onclick = function()
+        --     app.transaction(function()
+        --         local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+        --         local interpolationMethod = interpolationMethodLabelsInverted[dlg.data["interpolationMethod"]]
+        --         local palette = Palette(app.activeSprite.palettes[1])
+        --         local indices = getSelectedIndices(false)
+        --         for i = 1, #indices do
+        --             for j = i + 1, #indices do
+
+        --             end
+        --         end
+        --         app.activeSprite:setPalette(palette)
+        --     end)
+        --     app.refresh()
+        -- end}
+        -- dlg:newrow()
         dlg:button{text = "Resize", onclick = function()
             app.transaction(function()
                 local sprite = app.activeSprite
