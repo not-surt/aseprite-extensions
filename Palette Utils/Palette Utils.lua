@@ -269,7 +269,23 @@ function init(plugin)
         end
     end
 
-    local function applyMappingInSelection(cels, selection, pixelValueMapping)
+    local function indexMappingIdentity(palette)
+        local mapping = {}
+        for i = 0, #palette - 1 do
+            mapping[i] = i
+        end
+        return mapping
+    end
+
+    local function paletteApplyIndexMapping(palette, indexMapping)
+        local newPalette = Palette(#palette)
+        for i = 0, #palette - 1 do
+            newPalette:setColor(i, palette:getColor(indexMapping[i]))
+        end
+        return newPalette
+    end
+
+    local function applyPixelValueMappingInSelection(cels, selection, pixelValueMapping)
         perPixelInSelection(cels, selection, true, function (it)
             local pixelValue = pixelValueMapping[it()]
             if pixelValue ~= nil then
@@ -353,7 +369,7 @@ function init(plugin)
             if index ~= nil then
                 pixelValueMapping[pixelValue] = indexPixelValue(colourMode, palette, indexMapping[i])
             elseif unmappedIndexFunc ~= nil then
-                pixelValueMapping[pixelValue] = unmappedIndexFunc(colourMode, palette, indexMapping, newPalette, i)
+                pixelValueMapping[pixelValue] = indexPixelValue(colourMode, palette, unmappedIndexFunc(colourMode, palette, indexMapping, newPalette, i))
             end
         end
         return pixelValueMapping
@@ -370,7 +386,6 @@ function init(plugin)
         end
         local newPaletteColours = {}
         local mapping = {}
-        local removeIndicesIndex = 1
         local insertColoursIndex = 1
         local function insertColoursUntilIndex(index)
             while insertColours do
@@ -385,6 +400,7 @@ function init(plugin)
                 end
             end
         end
+        local removeIndicesIndex = 1
         for i = 0, #palette - 1 do
             -- Insert colours
             insertColoursUntilIndex(i)
@@ -432,7 +448,7 @@ function init(plugin)
         if unmappedIndexFunc ~= nil then
             local newPalette, indexMapping = paletteRemoveInsertMapping(palette, indices, nil)
             local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, unmappedIndexFunc)
-            applyMappingInSelection(cels, selection, pixelValueMapping)
+            applyPixelValueMappingInSelection(cels, selection, pixelValueMapping)
             sprite:setPalette(newPalette)
         end
     end
@@ -448,81 +464,89 @@ function init(plugin)
         [MergeMode.WEIGHTED_AVERAGE] = "Merge to Weighted Average",
     }
     local mergeModeLabelsInverted = tableInverse(mergeModeLabels)
-    local function mergeIndices(sprite, cels, selection, indices, mergeMode, distanceMetric, colourSpace)
+    local function mergeIndices(sprite, cels, selection, indexGroups, mergeMode, colourSpace)
         local colourMode = sprite.colorMode
         local palette = sprite.palettes[1]
-        local replacementIndex = nil
         local removeIndices = {}
-        if mergeMode == MergeMode.MOST_USED then
-            local indexCounts = indexCountsInSelection(colourMode, palette, cels, selection)
-            local sortTable = {}
-            for _, index in pairs(indices) do
-                table.insert(sortTable, {index = index, count = indexCounts[index]})
-            end
-            table.sort(sortTable, function(a, b)
-                return a.count < b.count
-            end)
-            replacementIndex = sortTable[#sortTable].index
-            for i = 1, #sortTable - 1 do
-                table.insert(removeIndices, sortTable[i].index)
-            end
-        elseif mergeMode == MergeMode.AVERAGE then
-            local sums = {0, 0, 0, 0}
-            local sumCount = 0
-            for _, index in pairs(indices) do
-                local colour = palette:getColor(index)
-                local converted = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(colour))
-                for i = 1, #sums do
-                    sums[i] = sums[i] + converted[i]
+        local replacementIndices = {}
+        for _, indices in pairs(indexGroups) do
+            if mergeMode == MergeMode.MOST_USED then
+                local indexCounts = indexCountsInSelection(colourMode, palette, cels, selection)
+                local sortTable = {}
+                for _, index in pairs(indices) do
+                    table.insert(sortTable, {index = index, count = indexCounts[index]})
                 end
-                sumCount = sumCount + 1
-            end
-            if sumCount > 0 then
-                local convertedAverage = {0, 0, 0, 0}
-                for i = 1, #convertedAverage do
-                    convertedAverage[i] = sums[i] / sumCount
+                table.sort(sortTable, function(a, b)
+                    return a.count < b.count
+                end)
+                local replacementIndex = sortTable[#sortTable].index
+                for i = 1, #sortTable - 1 do
+                    local index = sortTable[i].index
+                    replacementIndices[index] = replacementIndex
+                    table.insert(removeIndices, index)
                 end
-                local averageColour = floatVectorToColour(colourConvert(colourSpace, ColourSpace.RGB, convertedAverage))
-                replacementIndex = indices[1]
-                for i = 2, #indices do
-                    table.insert(removeIndices, indices[i])
+            elseif mergeMode == MergeMode.AVERAGE then
+                local sums = {0, 0, 0, 0}
+                local sumCount = 0
+                for _, index in pairs(indices) do
+                    local colour = palette:getColor(index)
+                    local converted = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(colour))
+                    for i = 1, #sums do
+                        sums[i] = sums[i] + converted[i]
+                    end
+                    sumCount = sumCount + 1
                 end
-                palette:setColor(replacementIndex, averageColour)
-            end
-        elseif mergeMode == MergeMode.WEIGHTED_AVERAGE then
-            local indexCounts = indexCountsInSelection(colourMode, palette, cels, selection)
-            local selectedIndexCounts = {}
-            for _, index in pairs(indices) do
-                selectedIndexCounts[index] = indexCounts[index]
-            end
-            local sums = {0, 0, 0, 0}
-            local sumCount = 0
-            for index, count in pairs(selectedIndexCounts) do
-                local colour = palette:getColor(index)
-                local converted = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(colour))
-                for i = 1, #sums do
-                    sums[i] = sums[i] + converted[i] * count
+                if sumCount > 0 then
+                    local convertedAverage = {0, 0, 0, 0}
+                    for i = 1, #convertedAverage do
+                        convertedAverage[i] = sums[i] / sumCount
+                    end
+                    local averageColour = floatVectorToColour(colourConvert(colourSpace, ColourSpace.RGB, convertedAverage))
+                    local replacementIndex = indices[1]
+                    for i = 2, #indices do
+                        local index = indices[i]
+                        replacementIndices[index] = replacementIndex
+                        table.insert(removeIndices, index)
+                    end
+                    palette:setColor(replacementIndex, averageColour)
                 end
-                sumCount = sumCount + count
-            end
-            if sumCount > 0 then
-                local convertedAverage = {0, 0, 0, 0}
-                for i = 1, #convertedAverage do
-                    convertedAverage[i] = sums[i] / sumCount
+            elseif mergeMode == MergeMode.WEIGHTED_AVERAGE then
+                local indexCounts = indexCountsInSelection(colourMode, palette, cels, selection)
+                local selectedIndexCounts = {}
+                for _, index in pairs(indices) do
+                    selectedIndexCounts[index] = indexCounts[index]
                 end
-                local averageColour = floatVectorToColour(colourConvert(colourSpace, ColourSpace.RGB, convertedAverage))
-                replacementIndex = indices[1]
-                for i = 2, #indices do
-                    table.insert(removeIndices, indices[i])
+                local sums = {0, 0, 0, 0}
+                local sumCount = 0
+                for index, count in pairs(selectedIndexCounts) do
+                    local colour = palette:getColor(index)
+                    local converted = colourConvert(ColourSpace.RGB, colourSpace, colourToFloatVector(colour))
+                    for i = 1, #sums do
+                        sums[i] = sums[i] + converted[i] * count
+                    end
+                    sumCount = sumCount + count
                 end
-                palette:setColor(replacementIndex, averageColour)
+                if sumCount > 0 then
+                    local convertedAverage = {0, 0, 0, 0}
+                    for i = 1, #convertedAverage do
+                        convertedAverage[i] = sums[i] / sumCount
+                    end
+                    local averageColour = floatVectorToColour(colourConvert(colourSpace, ColourSpace.RGB, convertedAverage))
+                    local replacementIndex = indices[1]
+                    for i = 2, #indices do
+                        local index = indices[i]
+                        replacementIndices[index] = replacementIndex
+                        table.insert(removeIndices, index)
+                    end
+                    palette:setColor(replacementIndex, averageColour)
+                end
             end
         end
         local newPalette, indexMapping = paletteRemoveInsertMapping(palette, removeIndices, nil)
         local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, function(colourMode, palette, indexMapping, newPalette, i)
-            return indexMapping[replacementIndex]
+            return indexMapping[replacementIndices[i]]
         end)
-        applyMappingInSelection(cels, selection, pixelValueMapping)
+        applyPixelValueMappingInSelection(cels, selection, pixelValueMapping)
         sprite:setPalette(newPalette)
     end
 
@@ -786,23 +810,29 @@ function init(plugin)
         dlg:separator{text = "Merge Indices"}
         dlg:button{text = "Selected", onclick = function()
             app.transaction(function()
-                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local mergeMode = mergeModeLabelsInverted[dlg.data["mergeMode"]]
-                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, getSelectedIndices(), mergeMode, distanceMetric, colourSpace)
+                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, {getSelectedIndices()}, mergeMode, colourSpace)
             end)
             app.refresh()
         end}
         dlg:button{text = "Similar", onclick = function()
-            local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
-            local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
-            local mergeMode = mergeModeLabelsInverted[dlg.data["mergeMode"]]
-            local palette = app.activeSprite.palettes[1]
-            local similarIndices = getIndicesSimilar(palette, getSelectedIndices(), distanceMetric, colourSpace, dlg.data["similarityThreshold"])
-            for index, mergeIndices in pairs(similarIndices) do
-                print(index, #mergeIndices) 
-            end
-            -- TODO -----------------
+            app.transaction(function()
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                local palette = app.activeSprite.palettes[1]
+                local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
+                local similarityThreshold = dlg.data["similarityThreshold"]
+                local mergeMode = mergeModeLabelsInverted[dlg.data["mergeMode"]]
+                local similarIndices = getIndicesSimilar(palette, getSelectedIndices(), distanceMetric, colourSpace, similarityThreshold, componentScales)
+                local indexGroups = {}
+                for index, indices in pairs(similarIndices) do
+                    table.insert(indices, index)
+                    table.insert(indexGroups, indices)
+                end
+                mergeIndices(app.activeSprite, app.range.cels, app.activeSprite.selection, indexGroups, mergeMode, colourSpace)
+            end)
+            app.refresh()
         end}
 
         dlg:separator{text = "Ramps"}
@@ -823,9 +853,10 @@ function init(plugin)
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
                 local interpolationMethod = interpolationMethodLabelsInverted[dlg.data["interpolationMethod"]]
                 local palette = Palette(app.activeSprite.palettes[1])
-                for i = 1, #app.range.colors - 1 do
+                local indices = getSelectedIndices(false)
+                for i = 1, #indices - 1 do
                     local indices = {}
-                    for j = app.range.colors[i], app.range.colors[i + 1] do
+                    for j = indices[i], indices[i + 1] do
                         table.insert(indices, j)
                     end
                     rampIndices(interpolationMethod, colourSpace, palette, indices)
@@ -838,10 +869,15 @@ function init(plugin)
         dlg:button{text = "Resize", onclick = function()
             app.transaction(function()
                 local sprite = app.activeSprite
+                local cels = app.range.cels
+                local selection = app.activeSprite.selection
                 local interpolationMethod = interpolationMethodLabelsInverted[dlg.data["interpolationMethod"]]
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
                 local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                local colourMode = sprite.colorMode
+                local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
                 local palette = app.activeSprite.palettes[1]
-                local fromIndices = getSelectedIndices()
+                local fromIndices = getSelectedIndices(false)
                 local toSize = dlg.data["rampSize"]
                 local toStep = 1.0 / (toSize - 1)
                 local pos = 0.0
@@ -851,22 +887,40 @@ function init(plugin)
                     pos = pos + toStep
                 end
                 local newPalette, indexMapping = paletteRemoveInsertMapping(palette, fromIndices, {{index = fromIndices[1], colours = toColours}})
-                -- local red = Color{red=255, green=0, blue=0, alpha=255}
-                -- local blue = Color{red=0, green=0, blue=255, alpha=255}
-                -- local newPalette, indexMapping = paletteRemoveInsertMapping(palette, {}, {{index=4, colour=red}, {index=5, colour=blue}, {index=6, colour=red}, {index=7, colour=blue}})
-                -- local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, function(colourMode, palette, indexMapping, newPalette, index)
-                --     return findNearestColourIndex(distanceMetric, colourSpace, newPalette, palette:getColor(index), componentScales)
-                -- end)
-                -- applyMappingInSelection(cels, selection, pixelValueMapping)
+                local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, function(colourMode, palette, indexMapping, newPalette, index)
+                    return findNearestColourIndex(distanceMetric, colourSpace, newPalette, palette:getColor(index), componentScales)
+                end)
+                -- TODO: map indices to nearest ramp positions
+                applyPixelValueMappingInSelection(cels, selection, pixelValueMapping)
                 sprite:setPalette(newPalette)
-                -- for i, colour in ipairs(toColours) do
-                --     palette:setColor(fromIndices[1] + i - 1, colour)
-                -- end
             end)
             app.refresh()
         end}
         dlg:button{text = "Reverse", onclick = function()
             app.transaction(function()
+                local sprite = app.activeSprite
+                local cels = app.range.cels
+                local selection = app.activeSprite.selection
+                local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+                local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+                local colourMode = sprite.colorMode
+                local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
+                local palette = app.activeSprite.palettes[1]
+                local indices = getSelectedIndices(false)
+                local reverseLength = #indices // 2
+                local indexMapping = indexMappingIdentity(palette)
+                for i = 1, reverseLength do
+                    local reverseIndex = #indices - (i - 1)
+                    local tempIndex = indexMapping[indices[i]]
+                    indexMapping[indices[i]] = indexMapping[indices[reverseIndex]]
+                    indexMapping[indices[reverseIndex]] = tempIndex
+                end
+                local newPalette = paletteApplyIndexMapping(palette, indexMapping)
+                local pixelValueMapping = buildPixelValueMappingFromIndexMapping(colourMode, palette, indexMapping, newPalette, function(colourMode, palette, indexMapping, newPalette, index)
+                    return findNearestColourIndex(distanceMetric, colourSpace, newPalette, palette:getColor(index), componentScales)
+                end)
+                applyPixelValueMappingInSelection(cels, selection, pixelValueMapping)
+                sprite:setPalette(newPalette)
             end)
             app.refresh()
         end}
@@ -903,6 +957,7 @@ function init(plugin)
         dlg:newrow()
         dlg:button{text = "Grid Centres", onclick = function()
             app.transaction(function()
+                -- TODO: includes extra cells
                 local palette = app.activeSprite.palettes[1]
                 local grid = app.activeSprite.gridBounds
                 local selection = app.activeSprite.selection
@@ -961,6 +1016,30 @@ function init(plugin)
         dlg:button{id = "colourCount", text = colourCountText, onclick = function()
             local colourSequence, _ = coloursInSelection(app.range.cels, app.activeSprite.selection)
             dlg:modify{id = "colourCount", text = colourCountText .. ": " .. tostring(#colourSequence)}
+        end}
+        local pixelCountText = "Count Pixels Used"
+        dlg:button{id = "pixelCount", text = pixelCountText, onclick = function()
+            local colourSequence, _ = coloursInSelection(app.range.cels, app.activeSprite.selection)
+            dlg:modify{id = "pixelCount", text = pixelCountText .. ": " .. tostring(#colourSequence)}
+        end}
+        dlg:newrow()
+        local measureDistanceText = "Measure Distance"
+        dlg:button{id = "measureDistance", text = measureDistanceText, onclick = function()
+            local palette = app.activeSprite.palettes[1]
+            local distanceMetric = distanceMetricLabelsInverted[dlg.data["distanceMetric"]]
+            local colourSpace = colourSpaceLabelsInverted[dlg.data["colourSpace"]]
+            local componentScales = {dlg.data["componentScale0"], dlg.data["componentScale1"], dlg.data["componentScale2"], dlg.data["componentScale3"]}
+            local indices = getSelectedIndices(false)
+            local maxDistance = 0
+            for i = 1, #indices do
+                for j = i + 1, #indices do
+                    local a = palette:getColor(indices[i])
+                    local b = palette:getColor(indices[j])
+                    local distance = colourDistance(distanceMetric, colourSpace, a, b, componentScales, false)
+                    maxDistance = math.max(maxDistance, distance)
+                end
+            end
+            dlg:modify{id = "measureDistance", text = measureDistanceText .. ": " .. tostring(maxDistance)}
         end}
         dlg:button{text = "Histogram", onclick = function()
             app.transaction(function()
